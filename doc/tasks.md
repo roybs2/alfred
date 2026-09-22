@@ -1,0 +1,64 @@
+# Task tracker
+
+Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and tested on this Mac. Automated agent delegation is not implemented. This file is the handoff point for continued work.
+
+## Done — foundation
+
+- [x] New standalone Git project in `/Users/roy/repos/agent-rooms`; temporary name.
+- [x] Electron + React + TypeScript + xterm.js + node-pty with lockfile.
+- [x] Isolated renderer, narrow preload API, main-frame IPC validation, CSP, provider allowlist.
+- [x] Create, rename, switch and remove rooms; select a project directory.
+- [x] Vertical session entries grouped under rooms; focus terminal from sidebar.
+- [x] Real PTY shell input/output, resize, close and process-exit events.
+- [x] Detect installed Claude Code and Codex; launch actions implemented through the same PTY path.
+- [x] Side-by-side terminal panes; retain terminal instances when switching rooms.
+- [x] Room-scoped activity for session lifecycle and manual paste.
+- [x] Manual paste normalizes to one line, removes control characters, and never adds Enter. This is not automated delegation or lossless context transfer.
+- [x] Persist room names/paths only; restart never pretends terminated sessions are live.
+- [x] Bound session count (12), activity (80 per room), and saved metadata (1 MiB).
+- [x] Close PTYs when removing a room or closing the app.
+- [x] Five backend tests pass.
+- [x] Production typecheck/build pass.
+- [x] Real Electron/PTY smoke passes: UI room creation, two shells, input/output, safe manual paste, switching, removal, metadata restoration after restart.
+- [x] Actual app screenshot: [workspace](screenshots/workspace.png).
+- [x] npm audit reports no known vulnerabilities at initial installation.
+
+## Capability validation — partial
+
+- [x] Inspect installed CLI help without dispatching model tasks: Claude Code 2.1.280, Codex CLI 0.149.1.
+- [x] Record Codex queue/agents/app-server and Claude background/attach/logs/stop paths.
+- [x] Read official App Server and Agent SDK overview; document authentication caveat.
+- [ ] Manually validate Claude and Codex interactive sessions with the user's chosen authentication. Detection is verified; model work has not been exercised by the smoke test.
+- [ ] Verify owned session identity, message delivery acknowledgement, completion, cancellation, and busy-session behavior.
+- [ ] Prove whether native subagent delegation can be redirected to another provider. Do not infer this from CLI launch or queue support.
+
+## Next — native-friendly collaboration
+
+1. Specify the smallest capability interface and preserve exact source context plus provenance.
+2. Validate one real send/receive path for each provider using its supported interface.
+3. Add a room-scoped bridge for send/spawn, with no routing LLM and no automatic context rewriting.
+4. Add room policy for authorized autonomous spawn/dispatch, allowed providers, concurrency, and stop.
+5. Display verified task/message events and parent/child relationships in Room Activity.
+6. Measure token overhead where observable; keep UI/lifecycle events out of model prompts.
+7. Test cross-provider task completion, failures, cancellation, and duplicate deliveries.
+
+## Remaining UX/release work
+
+- [ ] Resizable split handles and pane layout controls.
+- [ ] Distinct names/roles for multiple sessions of the same provider.
+- [ ] Better recovery and persisted activity/session display history (no sensitive transcripts by default).
+- [ ] Provider discovery beyond the initial Claude/Codex/shell allowlist, including verified Cursor support.
+- [ ] More accessibility and keyboard navigation checks.
+- [ ] Define supported macOS versions and Intel/Apple Silicon release coverage.
+- [ ] Signed/notarized installer, updates and clean-machine installation checks.
+- [ ] Select final name and license with owner; no public repository or release has been published.
+
+## Verification commands
+
+`npm test` — isolated backend tests.
+
+`npm run build` — TypeScript and production assets. One nonblocking bundle-size advisory remains.
+
+`npm run test:smoke` — real Electron + local shell, isolated temporary app state; never launches billable agent work. Rewrites the workspace screenshot.
+
+`npm run dev` — interactive development app.

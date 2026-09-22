@@ -1,0 +1,41 @@
+{
+  "name": "agent-rooms",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local agent workspaces with visible rooms and terminals",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
+    "preview": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "test": "node --test tests/*.test.cjs",
+    "test:smoke": "npm run build && node tests/smoke.cjs",
+    "format": "prettier --write src desktop tests vite.config.ts"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.0",
+    "@playwright/test": "^1.63.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^9.1.2",
+    "electron": "^44.4.4",
+    "prettier": "^3.9.8",
+    "typescript": "^5.7.3",
+    "vite": "^8.3.0",
+    "wait-on": "^8.0.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "type": "module"
+}
