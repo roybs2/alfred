@@ -146,9 +146,10 @@ This file is the handoff point for continued work.
 - [ ] Define supported macOS versions and Intel/Apple Silicon release coverage explicitly (x64 is
       packaged but untested on real hardware).
 - [ ] More accessibility and keyboard navigation checks.
-- [ ] GitHub Release v0.1.0 and making the repository public. The Codex live-verification
-      prerequisite is now satisfied (2026-09-23); still requires the owner's explicit go-ahead to
-      actually publish, which has not been given.
+- [x] GitHub Release [v0.1.0](https://github.com/roybs2/alfred/releases/tag/v0.1.0) published
+      2026-09-23 with owner approval: unsigned dmg + zip for arm64 and x64. The packaged arm64 app
+      passed smoke checks (detect agents, native PTY, provider allowlist, bridge tools) before
+      upload. Repository made public the same day.
 
 ## Verification commands
 
