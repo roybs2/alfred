@@ -149,3 +149,47 @@ The owner authorized a visible end-to-end run in the real Alfred app, with a bud
   - Tests: a Claude runner unit test, an updated Cursor delta expectation, and managed smoke assertions for no truncation, feed pinned to bottom, feed height ≥ 200px at 860×700, and no blank gap after a warning.
 - **Not addressed.** Agent output is shown as plain text, so Markdown such as `**…**` appears literally. The result text from Cursor still concatenates segments; it is passed through unchanged.
 - **Model turns used.** Claude: 3 tasks, one per run. Each task included one `room_send` tool call. Cursor: 3 delegated tasks. Cost was not captured in this run: at the time, the runner did not surface the provider's reported cost/usage, and none was shown in the UI. `desktop/agent-runner.cjs` and `desktop/agent-engine.cjs` now capture Claude's `total_cost_usd`/`usage`, Codex's `turn.completed.usage`, and Cursor's `result.usage` where the provider reports them, and include a `usage` field on the `task-completed` event when present (see decisions.md). This has not yet been exercised against a live run; unit tests cover the parsing (`tests/agent-engine.test.cjs`).
+
+## Final end-to-end test 2026-09-22
+
+The owner authorized a final visible run in the real app: a small multi-agent website build, with a budget of about 12 Claude and 8 Cursor turns. Codex was not used because it is rate-limited until Sep 23, 1:44 AM, so the room had 2 Claude and 2 Cursor agents. The scratch Playwright script lives outside the repo, like the live UI demo's. It launched the built app in test mode with isolated userData and drove the real renderer, the real detected CLIs (Claude Code 2.1.280, cursor-agent 2026.09.18-9a7762b), and the real `cliRunner` and `BridgeBroker`. The room folder was a fresh `git init`'d directory in the session scratchpad, outside this repo. No permission-bypass flag was passed, and no provider config was changed. Transcripts are not stored here.
+
+- **Setup, all through the UI.** Choose folder → tick "Pre-approve room tools" (Claude only, as the UI states). "Allow agents to create sessions" stayed off, since `room_spawn` was not used. Add session → Add multiple… → 2 Claude Code agents and 2 Cursor agents → Launch. The four panes were renamed inline to "Claude lead", "Claude reviewer", "Cursor designer" and "Cursor copy".
+- **Cursor workspace trust.** A native Cursor terminal pane in the room showed the trust prompt, and the script pressed `a`. No prompt was sent, so no model turn was used. The managed runner still never passes `--trust`.
+- **Scenario.** One task was typed into Claude lead's composer: build `index.html`, `styles.css` and `script.js` for an Alfred one-page site with a hero, a 5-card feature grid, and a `brew install --cask alfred` block with a Copy button and an aria-live status. Collaboration was through `room_send`, calling each agent once:
+  1. Cursor copy wrote the hero copy and feature blurbs.
+  2. Cursor designer wrote the full `styles.css` for the lead's class names.
+  3. Claude reviewer reviewed the written files for bugs and accessibility.
+  4. The lead integrated everything and applied the review.
+- **Observed, in order (local time 23:47–23:51, 251 s in total).**
+  - Claude lead `task-started`.
+  - After 16 s, `delegation` Claude lead → Cursor copy. Cursor copy completed in 8 s.
+  - `delegation` → Cursor designer. It completed in 36 s with a 3.3k-token CSS block.
+  - The lead wrote the three files.
+  - `delegation` → Claude reviewer. The reviewer read the three files and returned 10 findings plus 2 minor notes in 61 s.
+  - The lead applied all findings except one it judged harmless, then completed.
+  - The Delegations tree showed one parent with three children, going from started to completed. Every pane and the sidebar went running → idle. No `task-failed` or `permission-denied` events.
+- **Result.** The site in the room folder works. Opened in Playwright Chromium, it made no external requests and raised no console errors. Clicking Copy put `brew install --cask alfred` on the clipboard, the button showed "Copied", and the status showed "Copied to clipboard." At 375px there is no horizontal overflow.
+- **Permission findings.**
+  - Headless Claude writes were allowed under the user's `permissionMode: auto`: `Write` ×4, `Bash` ×5, `Read` ×3, with `permission_denials` empty. So no fallback where the user writes the files was needed. A user whose mode prompts for edits would see denials instead; Alfred surfaces them and never bypasses.
+  - The Cursor agents only returned text, as instructed. Cursor print mode without `--force` would only propose file changes anyway.
+  - Neither Cursor agent attempted a tool this time, so there were no denials.
+- **Behavior worth knowing.**
+  - Managed Claude sessions load the user's global `~/.claude/CLAUDE.md`. Following its "finishing a feature" rule, the lead tested the page in headless Chrome, created a branch in the room repo and committed. It then tried to push and stopped only because the room repo has no remote. It did not deploy, and asked instead. Anything a user's global instructions tell Claude to do also happens in managed sessions, within the user's permission mode.
+  - The lead wrote temporary screenshots to the system `/tmp`, outside the room folder. They were removed afterwards.
+- **Parallel `room_send`.** The lead issued both Cursor `room_send` calls in one assistant message, but Claude Code ran them one after the other: the second delegation started 3 s after the first child completed. Claude Code runs MCP tools that are not marked read-only one at a time. `room_send` must not claim `readOnlyHint`, so concurrent fan-out from one Claude turn is not available. Alfred's engine supports concurrent calls; they were not exercised by this run.
+- **Bugs found and fixed (renderer).**
+  - **Nested lists and numbering.** Reviewer findings written as `5. **Finding**` with nested `- **Problem:** …` / `- **Fix:** …` bullets rendered as one ordered list (bullets numbered 2, 3), and every block restarted at 1.
+    - Lists now honor their start number (`<ol start>`).
+    - Deeper-indented items become a nested sub-list under the previous item.
+    - Bullets no longer merge into an ordered list at the same indent.
+  - **Underscores in identifiers.** `room_send … room_send` in Cursor's copy turned into italics ("roomsend …"). Underscore emphasis now requires word boundaries, as in CommonMark.
+  - **Lost line breaks in Room Activity.** Summaries glued streamed lines together ("…together on MacSUBHEADLINE…", "```css/* Alfred"). Whitespace-only stream chunks, such as Cursor's lone `"\n"`, were dropped. They are now appended to the running activity item; they still never start a new item on their own.
+  - **Auto layout.** With 4 panes at a width that fits 3, Auto layout rendered 3 + 1 with a large empty area. Rows are now balanced (4 → 2 × 2; see decisions.md).
+  - **Tests.** Managed smoke assertions cover `<ol start>` and nested sub-lists, no emphasis inside `room_send`/`snake_case_name`, a whitespace-only chunk kept in the activity item, and balanced Auto rows for 6 panes in focus mode. The list assertion fails on the previous renderer. `npm test` (45/45), `npm run build`, `npm run test:smoke` and `npm run test:smoke:managed` pass.
+  - **Not a bug.** An early screenshot of the Add multiple dialog showed the empty-room text through it. It was captured during the dialog's 0.15 s fade-in and looks correct once settled.
+- **Model turns and reported usage.**
+  - **Claude:** 2 tasks. The lead is 1 task with about 16 assistant messages, reported $0.828 (24 input / 15,783 output tokens as reported). The reviewer is 1 task, reported $0.314 (6,329 output tokens). Total reported: $1.14.
+  - **Cursor:** 2 tasks with no cost field. Copy: 13,056 input / 247 output tokens. Designer: 13,821 input / 3,321 output tokens.
+  - **Codex:** not used.
+  - No model call was made for trust or setup. The post-fix layout check re-ran setup only, with no tasks.

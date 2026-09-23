@@ -92,6 +92,10 @@ Restart recovery needed some record of what happened before quitting, without st
 
 On restart, all sessions are shown as `ended` (their persisted `finalState`), never as `running`/`idle`, since no PTY or provider process actually survives a restart. Managed entries with a `providerSessionId` get a **Resume** action (creates a new engine session seeded with that id — the next task uses the provider's own `--resume`/equivalent). Terminal entries get a **Reopen** action (a new shell in the same working directory; no scrollback/transcript is restored, since none was ever stored). A **Clear history** action per room removes both fields for that room.
 
+## Auto pane layout balances rows (2026-09-22)
+
+Found in the final end-to-end test: with four managed panes at a width that fits three, the CSS `auto-fit` grid rendered 3 + 1, leaving a large empty area. In Auto mode (normal and focus mode) the renderer now computes the column count itself (`balancedAutoColumns` in `src/App.tsx`). It finds how many 290px columns fit (the same minimum and 13px gap as `.terminal-stack`), then balances the rows: 4 panes → 2 × 2, 5 → 3 + 2, 6 → 3 + 3. This is a render-time choice only. It never changes the room's saved `columns` setting, and explicit 1/2/3 column layouts are unchanged.
+
 ## Open questions
 
 - Which officially documented Claude Code and Codex interfaces, if any, provide stable structured session or delegation control?

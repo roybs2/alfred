@@ -1534,6 +1534,9 @@ button {
   margin: 2px 0;
   overflow-wrap: anywhere;
 }
+.md-sublist {
+  margin: 2px 0 4px;
+}
 .md-code {
   background: #221f29;
   border: 1px solid #3a3542;

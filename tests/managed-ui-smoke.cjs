@@ -352,6 +352,56 @@ fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
       'The raw tag text must still be visible as inert plain text',
     );
 
+    // Found in the final live run: a reviewer's numbered findings with nested "- Problem/Fix"
+    // bullets rendered as one ordered list (bullets numbered 2, 3), each block restarted at 1,
+    // and room_send in a Cursor answer turned into italics.
+    await send({
+      type: 'output',
+      sessionId: child.id,
+      roomId,
+      taskId: 'markdown-list-task',
+      text:
+        'Use room_send and snake_case_name here.\n\n' +
+        '5. **First finding** `a.js:1`\n   - **Problem:** p\n   - **Fix:** f\n\n' +
+        '6. **Second finding**\n   - **Problem:** q',
+    });
+    const listEntry = page.locator('#pane-synthetic-child .transcript-entry.agent').last();
+    await listEntry.locator('.md-sublist').first().waitFor();
+    assert.equal(await listEntry.locator('em').count(), 0, 'Intraword underscores must not become emphasis');
+    assert.ok(
+      (await listEntry.textContent()).includes('room_send and snake_case_name'),
+      'Identifiers keep their underscores',
+    );
+    const lists = await listEntry.evaluate((el) =>
+      Array.from(el.querySelectorAll('.md > ol.md-list')).map((ol) => ({
+        start: ol.start,
+        items: ol.querySelectorAll(':scope > li').length,
+        sub: Array.from(ol.querySelectorAll(':scope > li > ul.md-sublist')).map((ul) => ul.children.length),
+      })),
+    );
+    assert.deepEqual(
+      lists,
+      [
+        { start: 5, items: 1, sub: [2] },
+        { start: 6, items: 1, sub: [1] },
+      ],
+      'Numbered items keep their numbers and nested bullets stay bullets under their item',
+    );
+
+    // Whitespace-only stream chunks (Cursor streams a lone "\n") must still separate words in
+    // the Room Activity summary ("…MacSUBHEADLINE" in the live run).
+    for (const text of ['HEADLINE: Together on Mac', '\n', 'SUBHEADLINE: Rooms'])
+      await send({ type: 'output', sessionId: child.id, roomId, taskId: 'activity-ws-task', text });
+    const wsItem = page.locator('.activity-item', { hasText: 'HEADLINE: Together on Mac' }).last();
+    await wsItem.waitFor();
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll('.activity-item p')).some((p) => (p.textContent || '').includes('SUBHEADLINE: Rooms')),
+    );
+    assert.ok(
+      (await wsItem.locator('p').textContent()).includes('Mac\nSUBHEADLINE'),
+      'A whitespace-only chunk is kept inside the streamed activity item',
+    );
+
     // A Cursor managed session, so a Cursor-specific permission denial also
     // renders with a real "Cursor" label/icon (never a hardcoded two-provider
     // assumption) and is attributed correctly.
@@ -820,6 +870,20 @@ fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
     await sidebar.waitFor({ state: 'hidden' });
     await activityPanel.waitFor({ state: 'hidden' });
     await assertPanesDontOverlap('Focus mode with 6 tiled sessions');
+    // Auto layout balances rows (final live run: 4 panes rendered 3 + 1 with a large empty
+    // area). 6 panes must never leave a short orphan row, e.g. 4 + 2 or 5 + 1.
+    const focusRows = await page.evaluate(() => {
+      const rows = new Map();
+      for (const el of document.querySelectorAll('.pane-anchor:not(.pane-hidden) .terminal-card')) {
+        const top = Math.round(el.getBoundingClientRect().top);
+        rows.set(top, (rows.get(top) || 0) + 1);
+      }
+      return [...rows.values()];
+    });
+    assert.ok(
+      Math.max(...focusRows) - Math.min(...focusRows) <= 1 && focusRows.reduce((a, b) => a + b, 0) === 6,
+      'Auto layout rows must be balanced, got ' + JSON.stringify(focusRows),
+    );
     await page.waitForTimeout(250);
     await page.screenshot({ path: SCREENSHOT_DIR + 'final-focus-mode.png' });
 

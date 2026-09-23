@@ -530,6 +530,18 @@ function computePaneGrid(sessions: Session[], columns: number) {
 // is what actually gets rendered — the room's `columns` setting is only ever
 // a ceiling, never a promise, so a narrow window degrades to fewer columns
 // instead of ever overlapping panes.
+// Auto layout: the CSS auto-fit grid alone leaves an orphan row (4 panes at a
+// width that fits 3 render as 3 + 1 with a large empty area). Pick the number
+// of columns that fits (same 290px minimum and 13px gap as .terminal-stack),
+// then balance rows so every row is as full as possible: 4 -> 2x2, 5 -> 3+2.
+const AUTO_PANE_MIN_PX = 290;
+const AUTO_PANE_GAP_PX = 13;
+export function balancedAutoColumns(containerWidth: number, panes: number): number {
+  if (containerWidth <= 0 || panes <= 0) return 0;
+  const fit = Math.max(1, Math.floor((containerWidth + AUTO_PANE_GAP_PX) / (AUTO_PANE_MIN_PX + AUTO_PANE_GAP_PX)));
+  const cols = Math.min(fit, panes);
+  return Math.ceil(panes / Math.ceil(panes / cols));
+}
 function maxFittingColumns(containerWidth: number, columns: number): number {
   if (containerWidth <= 0) return columns;
   for (let n = columns; n > 1; n--) {
@@ -546,7 +558,14 @@ type MdBlock =
   | { type: 'heading'; level: number; text: string }
   | { type: 'paragraph'; text: string }
   | { type: 'code'; text: string }
-  | { type: 'list'; ordered: boolean; items: string[] };
+  | { type: 'list'; ordered: boolean; start: number; items: MdListItem[] };
+// One level of nesting: an item indented deeper than its list's first item (for
+// example "   - **Problem:** …" under "5. **Finding**") belongs to the previous
+// item as a sub-list, instead of becoming a sibling that inherits the parent's
+// numbering.
+type MdListItem = { text: string; sub?: { ordered: boolean; start: number; items: string[] } };
+const mdListLine = /^(\s*)([-*]|\d+[.)])\s+(.*)$/;
+const mdListStart = (marker: string) => (/^\d/.test(marker) ? parseInt(marker, 10) : 1);
 function parseMarkdownBlocks(text: string): MdBlock[] {
   const lines = text.split(/\r\n|\r|\n/);
   const blocks: MdBlock[] = [];
@@ -582,19 +601,28 @@ function parseMarkdownBlocks(text: string): MdBlock[] {
       i++;
       continue;
     }
-    const listItem = line.match(/^\s*([-*]|\d+[.)])\s+(.*)$/);
+    const listItem = line.match(mdListLine);
     if (listItem) {
       flushPara();
-      const ordered = /\d/.test(listItem[1]);
-      const items = [listItem[2]];
+      const indent = listItem[1].length;
+      const ordered = /\d/.test(listItem[2]);
+      const items: MdListItem[] = [{ text: listItem[3] }];
       i++;
       while (i < lines.length) {
-        const m = lines[i].match(/^\s*([-*]|\d+[.)])\s+(.*)$/);
+        const m = lines[i].match(mdListLine);
         if (!m) break;
-        items.push(m[2]);
+        const itemOrdered = /\d/.test(m[2]);
+        if (m[1].length > indent) {
+          const parent = items[items.length - 1];
+          if (!parent.sub) parent.sub = { ordered: itemOrdered, start: mdListStart(m[2]), items: [] };
+          parent.sub.items.push(m[3]);
+        } else if (itemOrdered === ordered) items.push({ text: m[3] });
+        else break;
         i++;
       }
-      blocks.push({ type: 'list', ordered, items });
+      // `start` keeps numbering right when a model separates "5." and "6." with blank
+      // lines or nested bullets (each run is its own list).
+      blocks.push({ type: 'list', ordered, start: mdListStart(listItem[2]), items });
       continue;
     }
     if (line.trim() === '') {
@@ -609,7 +637,9 @@ function parseMarkdownBlocks(text: string): MdBlock[] {
   return blocks;
 }
 const mdInlineRegex =
-  /`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+  // Underscore emphasis only at word boundaries (as in CommonMark): identifiers such as
+  // room_send or snake_case_name must never turn into italics.
+  /`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\p{L}\p{N}_])__([^_\n]+)__(?![\p{L}\p{N}_])|\*([^*\n]+)\*|(?<![\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])|\[([^\]\n]+)\]\(([^)\s]+)\)/gu;
 function renderMarkdownInline(text: string, keyPrefix: string) {
   const nodes: (string | JSX.Element)[] = [];
   mdInlineRegex.lastIndex = 0;
@@ -658,11 +688,27 @@ function MarkdownText({ text }: { text: string }) {
             </pre>
           );
         if (block.type === 'list') {
-          const items = block.items.map((item, j) => (
-            <li key={key + '-' + j}>{renderMarkdownInline(item, key + '-' + j)}</li>
-          ));
+          const items = block.items.map((item, j) => {
+            const itemKey = key + '-' + j;
+            const subItems = item.sub?.items.map((sub, k) => (
+              <li key={itemKey + '-' + k}>{renderMarkdownInline(sub, itemKey + '-' + k)}</li>
+            ));
+            return (
+              <li key={itemKey}>
+                {renderMarkdownInline(item.text, itemKey)}
+                {item.sub &&
+                  (item.sub.ordered ? (
+                    <ol className="md-list md-sublist" start={item.sub.start}>
+                      {subItems}
+                    </ol>
+                  ) : (
+                    <ul className="md-list md-sublist">{subItems}</ul>
+                  ))}
+              </li>
+            );
+          });
           return block.ordered ? (
-            <ol className="md-list" key={key}>
+            <ol className="md-list" key={key} start={block.start}>
               {items}
             </ol>
           ) : (
@@ -1406,11 +1452,14 @@ export default function App() {
   );
   const appendOutputActivity = useCallback((event: AgentEvent, name: string) => {
     const output = event.text;
-    if (!output?.trim()) return;
+    if (!output) return;
     const key = event.sessionId + ':' + event.taskId;
     setActivityByRoom((prev) => {
       const existing = prev[event.roomId] || [];
       const last = existing.at(-1);
+      // A whitespace-only chunk (providers often stream a lone "\n") still separates the
+      // words around it; it only must not start a new activity item on its own.
+      if (!output.trim() && last?.streamKey !== key) return prev;
       if (last?.streamKey === key)
         return {
           ...prev,
@@ -2554,6 +2603,8 @@ export default function App() {
     !focusMode && current && current.columns !== 'auto'
       ? maxFittingColumns(stackWidth, current.columns)
       : null;
+  const autoColumns =
+    current && !effectiveColumns ? balancedAutoColumns(stackWidth, current.sessions.length) : 0;
   const currentPaneGrid =
     current && effectiveColumns ? computePaneGrid(current.sessions, effectiveColumns) : null;
   const effectiveColumnWeights =
@@ -2988,7 +3039,9 @@ export default function App() {
                               effectiveColumns,
                             ),
                           }
-                        : {}),
+                        : autoColumns
+                          ? { gridTemplateColumns: `repeat(${autoColumns}, minmax(0, 1fr))` }
+                          : {}),
                     }}
                   >
                     {rooms.flatMap((room) =>
