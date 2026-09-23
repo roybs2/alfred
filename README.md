@@ -201,7 +201,7 @@ set (⌘C/⌘V/⌘A/⌘Z/⇧⌘Z/⌘Q/⌘H/⌘M) can never be rebound or swallow
 | --- | --- | --- | --- | --- |
 | **Claude Code** | ✅ | ✅ Verified live: init/session id/resume, bridge status, permission-denial behavior under default mode. Pre-approval flags are unit-tested; not yet confirmed live | ✅ Verified live — Claude lead → Claude reviewer completed in the final end-to-end run | ✅ Verified live, including a full Claude→Cursor `room_send` |
 | **Cursor CLI** (`cursor-agent`) | ✅ | ✅ Verified live: session id/resume, workspace-trust handling, denial events | ✅ Verified live — Claude→Cursor `room_send` completed end to end, and Cursor designer/Cursor copy both completed again as targets in the final end-to-end run | ⚠️ Denied by Cursor's own default permission mode in every test run; Alfred's pre-approval flags don't apply to Cursor (it only honors its own `Mcp(server:tool)` allow rules, which Alfred never writes). An allowed Cursor-initiated call is **not yet verified**. |
-| **Codex CLI** | ✅ | ⚠️ Adapter implemented and bridge startup/JSONL parsing verified live; a **successful Codex turn and `codex exec resume` are not yet verified** (blocked in testing by an account usage limit and a rejected model version) | ⚠️ Not yet verified end to end | ⚠️ Not yet run |
+| **Codex CLI** | ✅ | ✅ Verified live (0.156.1): full turn, `codex exec resume` on the same thread, bridge startup/JSONL parsing, cancellation | ✅ Verified live — a Claude→Codex `room_send` completed end to end | ✅ Verified live — Codex's own approval policy denies its `room_send` call by default (clear error, turn still completes); the room's "Pre-approve room tools" option suppresses that denial and a Codex→Claude `room_send` completes end to end |
 
 Nothing here is inferred from "the CLI launches" — see [doc/adapters.md](doc/adapters.md) for the
 full capability contract and [doc/native-integration.md](doc/native-integration.md) for exact flags
@@ -262,7 +262,6 @@ See [AGENTS.md](AGENTS.md) and [doc/README.md](doc/README.md) for the fuller pro
 Alfred's foundation (rooms, PTY sessions, managed agents, the room bridge, recovery, shortcuts) is
 implemented and tested. What's left, from [doc/tasks.md](doc/tasks.md):
 
-- Live-verify a successful Codex turn, `codex exec resume`, and a Codex-initiated `room_send`.
 - Live-verify an allowed Cursor-initiated `room_send` (needs a user-owned `Mcp(...)` allow rule),
   `room_spawn`, and cancellation against real Cursor sessions.
 - `room_spawn`, busy-session queueing, and delegated-call cancellation against real providers more

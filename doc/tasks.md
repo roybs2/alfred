@@ -4,9 +4,11 @@ Updated 2026-09-23. Alfred is a working Mac-first Electron app: local PTY termin
 managed-agent sessions for Claude Code, Codex and Cursor CLI, a per-room MCP bridge for
 `room_send`/`room_spawn` delegation, opt-in room policies, recovery after restart, configurable
 shortcuts, focus mode, and macOS packaging. Claude and Cursor delegation are verified live
-end-to-end, including a real multi-agent build (2 Claude + 2 Cursor). Codex's adapter is
-implemented and its bridge startup/parsing are verified live, but a full model turn is still
-pending a CLI upgrade. `npm test` passes 45/45. This file is the handoff point for continued work.
+end-to-end, including a real multi-agent build (2 Claude + 2 Cursor). Codex is now also verified
+live end-to-end (CLI upgraded to 0.156.1, usage limit reset): a full turn, `codex exec resume` on
+the same thread, `room_send` in both directions (Claude→Codex and Codex→Claude), and the
+`preapproveRoomTools` override suppressing Codex's own approval denial. `npm test` passes 45/45.
+This file is the handoff point for continued work.
 
 ## Done — foundation
 
@@ -58,15 +60,19 @@ pending a CLI upgrade. `npm test` passes 45/45. This file is the handoff point f
       Cursor's default permission mode (expected — no per-process tool allow exists for Cursor, so
       the room's pre-approval policy has no effect there).
 - [x] **Codex**: adapter implemented (`exec --json`, resume, per-tool `approval_mode` overrides,
-      `enabled_tools` scoping). Bridge startup and JSONL event parsing verified live (required-bridge
-      abort before any thread/model request, cancellation). A full successful turn is not yet
-      verified: the CLI installed during this work (0.149.1) rejects the configured model, and the
-      account hit its usage limit. Re-verification is pending a CLI upgrade.
+      `enabled_tools` scoping). Verified live end-to-end on 2026-09-23 against codex-cli 0.156.1: a
+      full successful turn (`agent_message`/`turn.completed`, usage), `codex exec resume` on the same
+      `thread_id`, required-bridge abort before any thread/model request, cancellation (SIGTERM, both
+      process and bridge child gone), `room_send` as a delegation target (Claude→Codex) and as a
+      caller (Codex→Claude) under both `preapproveRoomTools` off and on. CLI help and `-c` override
+      parsing were re-checked against 0.156.1 first (no model call); no runner changes were needed.
+      See [adapters.md](adapters.md#codex-live-verification-2026-09-23).
 - [x] Opt-in room policies: "Allow agents to create sessions" (spawn) and per-room session limit;
       "Pre-approve room tools" scoped to only this room's `room_send`/`room_spawn` tool names via
       Claude `--allowedTools` / Codex `approval_mode` overrides (not applicable to Cursor — see
-      decisions.md). Unit tests cover the flag; live confirmation that it suppresses denials is
-      still pending (blocked on the same Codex CLI/usage-limit issue).
+      decisions.md). Live-confirmed for both Claude and Codex on 2026-09-23: off, Codex's own
+      approval policy denies its `room_send` call client-side with a clear error item and the turn
+      still completes; on, the per-tool override suppresses the denial and the delegation completes.
 
 ## Done — UX
 
@@ -115,18 +121,15 @@ pending a CLI upgrade. `npm test` passes 45/45. This file is the handoff point f
   [Live UI demo 2026-09-22](adapters.md#live-ui-demo-2026-09-22).
 - Final end-to-end build (2 Claude + 2 Cursor, 3 `room_send` delegations, working site) —
   [Final end-to-end test 2026-09-22](adapters.md#final-end-to-end-test-2026-09-22).
-- Codex: required-bridge startup/abort, JSONL event parsing, cancellation (SIGTERM) — same live
-  verification section in adapters.md. Full turn not yet verified (see Pending).
+- Codex: required-bridge startup/abort, JSONL event parsing, cancellation (SIGTERM), a full turn,
+  `codex exec resume`, `room_send` as target and as caller (both pre-approval states) —
+  [Codex live verification 2026-09-23](adapters.md#codex-live-verification-2026-09-23).
 - Packaged-app checks (PTY, bridge startup, provider allowlist, DMG mount) — `doc/release.md`
   "Packaged-app testing".
 
 ## Pending
 
-- [ ] Live-verify a successful Codex turn, `codex exec resume`, and a Codex-initiated `room_send`,
-      once the CLI is upgraded past the current model/usage-limit block.
-- [ ] Live-confirm that the "Pre-approve room tools" flags actually suppress permission denials
-      (Claude `--allowedTools`, Codex `approval_mode`) — only config parsing is unit-verified today.
-- [ ] Live-verify `room_spawn` against real providers (currently unit-tested only).
+- [ ] Live-verify `room_spawn` against real providers (currently unit-tested only), for any provider.
 - [ ] Live-verify busy-session queueing/duplicate-suppression and cancellation of a delegated call
       against real providers.
 - [ ] Concurrent `room_send` fan-out from a single Claude turn is not available: Claude Code runs
@@ -143,8 +146,9 @@ pending a CLI upgrade. `npm test` passes 45/45. This file is the handoff point f
 - [ ] Define supported macOS versions and Intel/Apple Silicon release coverage explicitly (x64 is
       packaged but untested on real hardware).
 - [ ] More accessibility and keyboard navigation checks.
-- [ ] GitHub Release v0.1.0 and making the repository public — owner-approved to happen after the
-      Codex live-verification check above.
+- [ ] GitHub Release v0.1.0 and making the repository public. The Codex live-verification
+      prerequisite is now satisfied (2026-09-23); still requires the owner's explicit go-ahead to
+      actually publish, which has not been given.
 
 ## Verification commands
 

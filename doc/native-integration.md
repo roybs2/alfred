@@ -1,6 +1,6 @@
 # Native-friendly room tools: provider adapter research
 
-Researched 2026-09-22 against Claude Code 2.1.280 and Codex CLI 0.149.1 installed on the development Mac. Provider help and documentation were inspected without starting model work. The only configuration probe was `codex mcp list` with a deliberately invalid local command; it did not start an agent or call a model.
+Researched 2026-09-22 against Claude Code 2.1.280 and Codex CLI 0.149.1 installed on the development Mac. Provider help and documentation were inspected without starting model work. The only configuration probe was `codex mcp list` with a deliberately invalid local command; it did not start an agent or call a model. Re-checked 2026-09-23 against Codex CLI **0.156.1** (`codex exec --help`, `codex exec resume --help`, `codex mcp get --json` with the runner's full override set): the argument shapes below are unchanged, and this version also completed live model turns — see [adapters.md](adapters.md#codex-live-verification-2026-09-23).
 
 ## Recommendation
 
@@ -91,12 +91,32 @@ Verified live on 2026-09-22 (owner-authorized minimal runs; evidence in [adapter
   - `thread.started.thread_id`, `turn.started`, non-fatal `item.completed{type:"error"}` warnings, and `error` / `turn.failed` are emitted as the runner parses them.
 - **Cancellation:** `stopSession` emits `task-failed` immediately. The provider child exits on SIGTERM, and its bridge grandchild is gone.
 
+Verified live on 2026-09-23 against **codex-cli 0.156.1** (owner-authorized minimal runs, ≤6 Codex /
+≤3 Claude turns; evidence in [adapters.md](adapters.md#codex-live-verification-2026-09-23)), once the
+CLI was upgraded and the account's usage limit reset:
+- **A full successful Codex turn**, with `agent_message`/`turn.completed` and reported token usage,
+  using the user's own configured model (no override).
+- **`codex exec resume`**, reattaching to the same `thread_id` and completing a second turn.
+- **Claude → Codex `room_send`**, completing normally and returning a successful `tool_result` to
+  Claude.
+- **Codex → Claude `room_send` as the caller**, under both `preapproveRoomTools: false` and `true`:
+  - **Off:** Codex's own client-side approval check denies the call before it reaches the bridge, with
+    a clear `mcp_tool_call` error item ("MCP tool call requires approval, but approval policy is
+    never"); the turn still completes, with the model explaining the failure as its answer. Nothing
+    hangs and nothing is silently dropped.
+  - **On:** the runner's per-tool `-c mcp_servers.<bridge>.tools.room_send.approval_mode="approve"`
+    override (scoped to this bridge's `room_send` only) suppresses the denial; the call reaches the
+    bridge, delegates to Claude, and completes end to end.
+  - CLI re-check confirmed `codex exec --help` / `codex exec resume --help` argument shapes and all of
+    the runner's `-c mcp_servers.<name>.*` override keys are unchanged in 0.156.1; no runner code
+    changes were needed.
+
 Not verified end to end:
-- A successful Codex turn (`agent_message` / `turn.completed`) and `codex exec resume`. The user's configured Codex model is rejected by CLI 0.149.1, and the account hit its usage limit during the run.
-- Codex as a `room_send` caller, and whether `codex exec` prompts for, denies, or allows MCP calls by default.
-- That the new pre-approval flags (Claude `--allowedTools mcp__<bridge>__room_send[,room_spawn]`, Codex per-tool `approval_mode="approve"`) suppress denials live. Only config parsing is verified.
-- `room_spawn`, busy-session queueing, duplicate suppression, and cancellation of a delegated call against real providers.
-- Cost attribution beyond Claude's reported `total_cost_usd`.
+- `room_spawn`, busy-session queueing, duplicate suppression, and cancellation of a delegated (not
+  top-level) call against real providers, for any provider.
+- Cost attribution beyond Claude's reported `total_cost_usd` (Codex reports tokens only, no cost).
+- Codex's client-side MCP-approval denial shape under an `approval_policy` other than the account's
+  real `never`.
 
 - Cursor: an allowed Cursor-initiated room tool call, `room_spawn`, cancellation, and failed-bridge detection (see adapters.md).
 

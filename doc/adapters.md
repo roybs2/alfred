@@ -8,8 +8,9 @@
 > `doc/architecture.md`'s "Current implementation and limits" for the as-built process/data model.
 > The dated live-verification sections further below in this file (from "Live verification
 > 2026-09-22" onward) are the evidence that those adapters actually work, including a real
-> cross-provider multi-agent build. See `doc/tasks.md` for current status and what remains pending
-> (notably a full live Codex turn).
+> cross-provider multi-agent build, plus the 2026-09-23 section confirming a full live Codex turn,
+> resume, both delegation directions, and the pre-approval override. See `doc/tasks.md` for current
+> status and what remains pending.
 
 ## Why this boundary matters
 
@@ -101,6 +102,100 @@ This check used Codex. `stopSession` was called about 2.5 s after spawn, after `
   - Whether `codex exec` prompts, auto-denies, or auto-allows MCP tool calls without the override is still unknown.
 - ~~Surfacing `permission_denials` / `system/permission_denied` as a visible activity event.~~ Done: engine `permission-denied` event (see the Cursor section for the live check).
 - Delegated-call cancellation, busy-target queueing, and `room_spawn` against real providers.
+
+## Codex live verification 2026-09-23
+
+The owner upgraded Codex CLI from 0.149.1 to **codex-cli 0.156.1** and the account's usage limit
+reset, unblocking the two items left pending on 2026-09-22 (a successful turn and resume). The
+owner authorized minimal live runs: at most 6 Codex and 3 Claude model turns. Environment: Codex CLI
+0.156.1, Claude Code 2.1.280, Node v26.3.0 as the bridge executable, macOS, a fresh `git init`'d
+temporary directory as the room cwd (outside this repository), the user's existing sign-in and
+existing `~/.codex/config.toml` (model `gpt-6-astra`, `model_reasoning_effort = "low"`). No
+`-c model=…` override, no permission-bypass flag, and no change to any global config. The harness is
+the same scratch harness as 2026-09-22, driving the real `AgentEngine`, `BridgeBroker`, and
+`cliRunner`. Evidence below is event types, ids (truncated), and timings only; no transcripts.
+
+### Pre-flight: CLI surface re-check (no model call)
+
+`codex exec --help` and `codex exec resume --help` on 0.156.1 show the same argument shapes the
+runner already relies on: `exec [OPTIONS] [PROMPT]`, `-` (or omitted) reads the prompt from stdin;
+`exec resume [OPTIONS] [SESSION_ID] [PROMPT]` with `-` for stdin; `-c key=value` config overrides on
+both. `codex mcp get alfred_room_test --json` with all of the runner's overrides —
+`mcp_servers.<name>.command`, `.args`, `.env` (as a TOML inline table), `.required=true`,
+`.tool_timeout_sec`, `.enabled_tools`, and per-tool `.tools.<tool>.approval_mode="approve"` — exited
+0 and echoed the command/args/env/enabled_tools back correctly (no model request; `required` and
+`tools.*.approval_mode` aren't in `mcp get`'s printed shape but were accepted, not rejected). **No
+runner changes were needed**: `desktop/agent-runner.cjs`'s argv and `-c` overrides for Codex are
+unchanged from the 2026-09-22 design and still match 0.156.1.
+
+### Live checks
+
+1. **Single turn — verified.** `codex exec --json -c … -` (the user's real `gpt-6-astra` model, no
+   override). Event order: `thread.started` (`thread_id` `01a0ce1e-88c0-…`, ~0.5s after spawn), two
+   non-fatal `item.completed{item:{type:"error"}}` warnings (as before, ignored by the runner),
+   `turn.started`, `item.completed{item:{type:"agent_message", text:"OK"}}` at ~5.5s, `turn.completed`
+   with `usage:{input_tokens:21339, cached_input_tokens:7040, output_tokens:5, …}` at ~6.2s, process
+   exit 0 at ~7.6s. Runner returned `{text:"OK", providerSessionId:"01a0ce1e-…", usage:{inputTokens,
+   outputTokens}}`. Total task time ~7.2s.
+2. **Resume — verified.** Second task on the same managed session spawned `codex exec resume --json
+   -c … 01a0ce1e-88c0-… -`. `thread.started` reported the **same** `thread_id`. `turn.completed` at
+   ~16.5s with `usage:{input_tokens:42735, cached_input_tokens:28160, output_tokens:10}` (higher
+   input token count consistent with accumulated thread context). `SAME_SESSION` check: true. Total
+   task time ~10.2s.
+3. **Claude → Codex `room_send` — verified.** Under the user's normal Claude permission mode (`auto`,
+   no `--permission-mode` override), Claude found `mcp__alfred_room_…__room_send` via `ToolSearch` and
+   called it with `{to:"Codex", task:"Reply with the word OK and nothing else."}`. Engine emitted
+   `delegation` ("Claude → Codex"), started a Codex task with the exact provenance envelope, and Codex
+   completed normally (`turn.completed`, `agent_message:"OK"`, thread `01a0ce1f-0ea2-…`) in ~6.8s. The
+   result came back to Claude as a successful `tool_result` (not `is_error`), and Claude's own task
+   completed with `result:"OK"`, `permission_denials: []`, reported cost `$0.1449536`, `num_turns: 3`.
+4. **Codex → Claude `room_send`, policy OFF then ON — verified, both recorded exactly.**
+   - **`preapproveRoomTools: false` (default).** Codex's *own* client-side approval check rejected the
+     call before it ever reached the bridge or the target session: `item.started{type:"mcp_tool_call",
+     status:"in_progress", tool:"room_send"}` immediately followed by `item.completed{status:"failed",
+     error:{message:"MCP tool call requires approval, but approval policy is never"}}`. This is the
+     user's own real `approval_policy` (their config; the runner never set it), evaluated by Codex
+     itself — not a bridge denial, not a hang, not a silent cancel. The turn then completed normally
+     (`turn.completed`) with the model's own `agent_message` explaining the failure back to the room
+     task text ("MCP tool call requires approval, but approval policy is never"). No delegation
+     occurred — the target Claude session in the harness never received a task. **Finding:** in `codex
+     exec` (non-interactive), an MCP tool call that needs approval under the user's approval policy is
+     auto-denied client-side with a clear error item, not silently dropped and not blocking forever.
+   - **`preapproveRoomTools: true`.** The runner added `-c
+     mcp_servers.<bridge>.tools.room_send.approval_mode="approve"` (scoped to this bridge server's
+     `room_send` only — the session's own `approval_policy` is untouched for every other tool). Codex's
+     `mcp_tool_call` item went `in_progress` → `completed` with no error; the engine emitted
+     `delegation` ("Codex → Claude"), the target Claude session started with `--allowedTools
+     mcp__<bridge>__room_send` (same pre-approval, since this is a live Claude target too) and
+     completed in ~1.8s (`result:"OK"`, `permission_denials: []`, `num_turns: 1`, cost `$0.1229356`).
+     The result returned to Codex as a successful tool result, and Codex's own turn completed with
+     `agent_message:"OK"`. **Confirms live** (not just config-parsed) that the Codex per-tool
+     `approval_mode="approve"` override suppresses the "requires approval" denial for exactly the room
+     tools, and only those.
+5. **Cancellation during a Codex turn — verified.** `stopSession` was called ~1.5s after spawn, right
+   after `thread.started`/`turn.started` and before any `item.completed`. The engine emitted
+   `task-failed` ("Agent session stopped") and `session-stopped` immediately. The child exited with
+   `SIGTERM` (`exitCode: null`, `signalCode: "SIGTERM"`). After 4.5s, `kill(pid, 0)` failed and `ps`
+   showed no `room-mcp-bridge` process for that pid — process and bridge grandchild both gone.
+
+### Model turns used (2026-09-23)
+
+- **Codex:** 6 `turn.started` attempts, all reaching the model: single turn, resume, delegated
+  target (Claude→Codex), policy-OFF caller, policy-ON caller, and the cancelled turn. This is exactly
+  the authorized cap; no further Codex turns were run this session.
+- **Claude:** 2 tasks that reached the model: the Claude→Codex `room_send` caller, and the Claude
+  target of the policy-ON Codex→Claude `room_send`. One of the authorized 3 was not used.
+
+### Remains
+
+- `room_spawn` against a real Codex session (Codex as spawner or spawned target), busy-session
+  queueing/duplicate suppression, and cancellation of a delegated (not top-level) Codex call — still
+  unit-tested only.
+- Whether Codex's client-side MCP-approval denial has a different shape under an `approval_policy`
+  other than `never` (e.g. `on-request`) — not tested. The account's real, unmodified config resolves
+  to `never` (Codex's own error text named it: "approval policy is never"); `~/.codex/config.toml`
+  itself sets no explicit `approval_policy` key, so this is Codex's default, not a value the owner set
+  or the runner overrode.
 
 ## Cursor CLI live verification 2026-09-22
 
