@@ -10,6 +10,16 @@ const { cliRunner } = require(path.join(__dirname, 'agent-runner.cjs'));
 
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_SESSIONS = 12;
+// Persisted history bounds (per room). Session history is metadata only — never terminal output or
+// agent transcripts. Activity history is short lifecycle/delegation/permission-denied labels only —
+// never agent output or task text (see decisions.md). Oldest entries are dropped first.
+const MAX_SESSION_HISTORY = 50;
+const MAX_ACTIVITY_HISTORY = 200;
+const MAX_HISTORY_TEXT = 300;
+const MAX_HISTORY_NAME = 200;
+const MAX_PROVIDER_SESSION_ID = 400;
+const SESSION_FINAL_STATES = ['exited', 'stopped', 'failed', 'completed'];
+const ACTIVITY_KINDS = ['system', 'user', 'warning'];
 const sessions = new Map();
 let mainWindow;
 let pty;
@@ -187,6 +197,56 @@ function ensurePty() {
   return pty;
 }
 
+// --- Persisted history sanitization (defense in depth) ---
+// The renderer decides what state shape to save; these two fields, when present on a saved room,
+// are validated and bounded here regardless of what the renderer sends, so a renderer bug can
+// never smuggle transcript/task text into durable storage or grow history without bound.
+function safeHistoryText(value, max) {
+  return typeof value === 'string' && value.length > 0 && value.length <= max && !value.includes('\0');
+}
+function safeHistoryNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+function sanitizeSessionHistoryEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const allowed = ['id', 'name', 'provider', 'kind', 'createdAt', 'endedAt', 'finalState', 'providerSessionId'];
+  if (Object.keys(entry).some((key) => !allowed.includes(key))) return null;
+  const { id, name, provider, kind, createdAt, endedAt, finalState, providerSessionId } = entry;
+  if (!safeHistoryText(id, 80) || !safeHistoryText(name, MAX_HISTORY_NAME) || !safeHistoryText(provider, 40))
+    return null;
+  if (kind !== 'terminal' && kind !== 'managed') return null;
+  if (!safeHistoryNumber(createdAt) || !safeHistoryNumber(endedAt)) return null;
+  if (!SESSION_FINAL_STATES.includes(finalState)) return null;
+  if (providerSessionId !== undefined && !safeHistoryText(providerSessionId, MAX_PROVIDER_SESSION_ID))
+    return null;
+  const out = { id, name, provider, kind, createdAt, endedAt, finalState };
+  if (providerSessionId !== undefined) out.providerSessionId = providerSessionId;
+  return out;
+}
+function sanitizeActivityHistoryEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const allowed = ['id', 'text', 'time', 'kind'];
+  if (Object.keys(entry).some((key) => !allowed.includes(key))) return null;
+  const { id, text, time, kind } = entry;
+  if (!safeHistoryText(id, 80) || !safeHistoryText(text, MAX_HISTORY_TEXT)) return null;
+  if (!safeHistoryNumber(time)) return null;
+  if (!ACTIVITY_KINDS.includes(kind)) return null;
+  return { id, text, time, kind };
+}
+function sanitizeRoomHistory(room) {
+  if (!room || typeof room !== 'object' || Array.isArray(room)) return room;
+  const out = { ...room };
+  if ('sessionHistory' in out)
+    out.sessionHistory = Array.isArray(out.sessionHistory)
+      ? out.sessionHistory.map(sanitizeSessionHistoryEntry).filter(Boolean).slice(-MAX_SESSION_HISTORY)
+      : [];
+  if ('activityHistory' in out)
+    out.activityHistory = Array.isArray(out.activityHistory)
+      ? out.activityHistory.map(sanitizeActivityHistoryEntry).filter(Boolean).slice(-MAX_ACTIVITY_HISTORY)
+      : [];
+  return out;
+}
+
 handle('rooms:detect-agents', () => detectAgents());
 handle('rooms:choose-directory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -242,13 +302,13 @@ handle('rooms:close-session', (id) => {
     item.terminal.kill();
   }
 });
-handle('rooms:create-agent-session', ({ roomId, provider, cwd, name } = {}) => {
+handle('rooms:create-agent-session', ({ roomId, provider, cwd, name, providerSessionId } = {}) => {
   const workingDirectory = fs.realpathSync(path.resolve(stringArg(cwd, 'working directory')));
   if (!fs.statSync(workingDirectory).isDirectory())
     throw new TypeError('Working directory must be a directory');
   const agent = detectAgents().find((item) => item.id === provider);
   if (!agent?.available || !agent.path) throw new Error(`${provider} executable was not found`);
-  return agentEngine.createSession({ roomId, provider, cwd: workingDirectory, name });
+  return agentEngine.createSession({ roomId, provider, cwd: workingDirectory, name, providerSessionId });
 });
 handle('rooms:run-agent-task', (options) => agentEngine.runTask(options || {}));
 handle('rooms:stop-agent-session', (id) => agentEngine.stopSession(id));
@@ -271,7 +331,10 @@ handle('rooms:load-state', () => {
 handle('rooms:save-state', (state) => {
   if (!state || typeof state !== 'object' || Array.isArray(state))
     throw new TypeError('State must be an object');
-  const serialized = JSON.stringify(state);
+  const sanitized = Array.isArray(state.rooms)
+    ? { ...state, rooms: state.rooms.map(sanitizeRoomHistory) }
+    : state;
+  const serialized = JSON.stringify(sanitized);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_STATE_BYTES)
     throw new RangeError('Project state exceeds 1 MB');
   const dir = app.getPath('userData');

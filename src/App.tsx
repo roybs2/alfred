@@ -24,6 +24,7 @@ type TerminalSession = {
   name: string;
   status: 'running' | 'exited';
   exitCode?: number;
+  createdAt: number;
 };
 // Usage the provider itself reported for a task, never estimated locally.
 // Every field is optional and only ever set from a real `usage` payload on a
@@ -48,8 +49,28 @@ type ManagedSession = {
   // Running sum of every task-completed usage this session has reported, field by
   // field (a field stays unset until the provider actually reports it once).
   usageTotal?: Usage;
+  createdAt: number;
+  // The provider's own opaque session/thread id (Claude session_id, Codex thread_id, Cursor
+  // session id), captured once the provider reports it on a task-completed event, or carried
+  // over immediately when this session was itself created via Resume. Never a credential — only
+  // ever used to ask the provider CLI to resume this same conversation. See doc/decisions.md.
+  providerSessionId?: string;
 };
 type Session = TerminalSession | ManagedSession;
+// Persisted, ended-session metadata only (see doc/decisions.md) — never terminal output or an
+// agent transcript. finalState never includes 'running'/'idle': a session only earns a history
+// entry once it is truly not live in this process (closed, or gone after a restart).
+type SessionFinalState = 'exited' | 'stopped' | 'failed' | 'completed';
+type SessionHistoryEntry = {
+  id: string;
+  name: string;
+  provider: Provider;
+  kind: Session['kind'];
+  createdAt: number;
+  endedAt: number;
+  finalState: SessionFinalState;
+  providerSessionId?: string;
+};
 // Pane layout is UI metadata only (which never includes transcripts): how many
 // columns the session panes are split into, and the relative width of each one.
 type ColumnCount = 1 | 2 | 3;
@@ -66,6 +87,58 @@ type Room = {
   // Relative widths (fr units), one per column, only meaningful when columns !== 'auto'.
   columnWeights: number[];
 };
+// Bounds mirrored from desktop/main.cjs (also enforced there, defensively, at the save-state
+// IPC boundary): oldest entries dropped first.
+const MAX_SESSION_HISTORY = 50;
+const MAX_ACTIVITY_HISTORY = 200;
+const SESSION_FINAL_STATES: SessionFinalState[] = ['exited', 'stopped', 'failed', 'completed'];
+function parseSessionHistory(raw: unknown): SessionHistoryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (e): e is Record<string, unknown> =>
+        !!e &&
+        typeof e === 'object' &&
+        typeof (e as any).id === 'string' &&
+        typeof (e as any).name === 'string' &&
+        typeof (e as any).provider === 'string' &&
+        ((e as any).kind === 'terminal' || (e as any).kind === 'managed') &&
+        typeof (e as any).createdAt === 'number' &&
+        typeof (e as any).endedAt === 'number' &&
+        SESSION_FINAL_STATES.includes((e as any).finalState),
+    )
+    .map((e) => ({
+      id: e.id as string,
+      name: e.name as string,
+      provider: e.provider as Provider,
+      kind: e.kind as Session['kind'],
+      createdAt: e.createdAt as number,
+      endedAt: e.endedAt as number,
+      finalState: e.finalState as SessionFinalState,
+      ...(typeof e.providerSessionId === 'string' ? { providerSessionId: e.providerSessionId } : {}),
+    }))
+    .slice(-MAX_SESSION_HISTORY);
+}
+function parseActivityHistory(raw: unknown): ActivityItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (e): e is Record<string, unknown> =>
+        !!e &&
+        typeof e === 'object' &&
+        typeof (e as any).id === 'string' &&
+        typeof (e as any).text === 'string' &&
+        typeof (e as any).time === 'number' &&
+        ((e as any).kind === 'system' || (e as any).kind === 'user' || (e as any).kind === 'warning'),
+    )
+    .map((e) => ({
+      id: e.id as string,
+      text: e.text as string,
+      time: e.time as number,
+      kind: e.kind as ActivityItem['kind'],
+    }))
+    .slice(-MAX_ACTIVITY_HISTORY);
+}
 type AgentEvent = {
   type:
     | 'session-created'
@@ -86,12 +159,15 @@ type AgentEvent = {
   targetTaskId?: string;
   // Only ever present when the provider itself reported it on task-completed.
   usage?: Usage;
+  // Only ever present on task-completed: the provider's own opaque session/thread id.
+  providerSessionId?: string;
   session?: {
     id: string;
     roomId: string;
     provider: AgentProvider;
     name: string;
     status: ManagedSession['status'];
+    providerSessionId?: string;
   };
 };
 type ActivityItem = {
@@ -136,12 +212,15 @@ type Bridge = {
     provider: AgentProvider;
     cwd: string;
     name?: string;
+    // An opaque provider session/thread id from a previous run, to resume it (see decisions.md).
+    providerSessionId?: string;
   }): Promise<{
     id: string;
     roomId: string;
     provider: AgentProvider;
     name: string;
     status: ManagedSession['status'];
+    providerSessionId?: string;
   }>;
   runAgentTask(input: { sessionId: string; text: string }): Promise<{ taskId: string }>;
   stopAgentSession(id: string): Promise<void>;
@@ -813,6 +892,14 @@ export default function App() {
   const [confirmRemoveRoom, setConfirmRemoveRoom] = useState(false);
   const confirmRemoveTimer = useRef<number | undefined>(undefined);
   const [activityByRoom, setActivityByRoom] = useState<Record<string, ActivityItem[]>>({});
+  // Ended-session metadata only, per room (see SessionHistoryEntry). Populated explicitly when a
+  // session is closed, and — for any session still live when the app quits without an explicit
+  // close (PTYs and engine sessions never survive a restart either way) — merged in at save time
+  // from a snapshot of the live session list. Either way, restart shows every prior session as
+  // truly ended, never as fictitiously running/idle.
+  const [sessionHistoryByRoom, setSessionHistoryByRoom] = useState<Record<string, SessionHistoryEntry[]>>(
+    {},
+  );
   const [delegationsByRoom, setDelegationsByRoom] = useState<Record<string, DelegationRecord[]>>(
     {},
   );
@@ -865,6 +952,52 @@ export default function App() {
       return { ...prev, [event.roomId]: [...existing, item].slice(-80) };
     });
   }, []);
+  // Metadata only — id/name/provider/kind/timestamps/final state, plus the opaque
+  // providerSessionId when the session had one. Never the session's transcript/output.
+  const toHistoryEntry = useCallback(
+    (session: Session, finalState: SessionFinalState): SessionHistoryEntry => ({
+      id: session.id,
+      name: session.name,
+      provider: session.provider,
+      kind: session.kind,
+      createdAt: session.createdAt,
+      endedAt: Date.now(),
+      finalState,
+      ...(session.kind === 'managed' && session.providerSessionId
+        ? { providerSessionId: session.providerSessionId }
+        : {}),
+    }),
+    [],
+  );
+  const inferFinalState = useCallback((session: Session): SessionFinalState => {
+    if (session.kind === 'terminal') return session.status === 'exited' ? 'exited' : 'stopped';
+    return session.status === 'failed' ? 'failed' : 'stopped';
+  }, []);
+  const recordSessionEnded = useCallback(
+    (roomId: string, session: Session, finalState: SessionFinalState) => {
+      const entry = toHistoryEntry(session, finalState);
+      setSessionHistoryByRoom((prev) => ({
+        ...prev,
+        [roomId]: [...(prev[roomId] || []).filter((e) => e.id !== entry.id), entry].slice(-MAX_SESSION_HISTORY),
+      }));
+    },
+    [toHistoryEntry],
+  );
+  // Every session still live when state is saved is merged into the persisted history as a
+  // fallback snapshot (see sessionHistoryByRoom comment above) — a session explicitly closed
+  // already has a more accurate recorded entry, which wins.
+  const mergedSessionHistory = useCallback(
+    (room: Room): SessionHistoryEntry[] => {
+      const byId = new Map<string, SessionHistoryEntry>();
+      for (const entry of sessionHistoryByRoom[room.id] || []) byId.set(entry.id, entry);
+      for (const session of room.sessions)
+        if (!byId.has(session.id)) byId.set(session.id, toHistoryEntry(session, inferFinalState(session)));
+      return Array.from(byId.values())
+        .sort((a, b) => a.endedAt - b.endedAt)
+        .slice(-MAX_SESSION_HISTORY);
+    },
+    [sessionHistoryByRoom, toHistoryEntry, inferFinalState],
+  );
   useEffect(() => {
     if (!bridge) return;
     let active = true;
@@ -905,6 +1038,15 @@ export default function App() {
                     : 1) as ColumnCount,
                 ),
           })) as Room[];
+        const rawRooms = (Array.isArray(rows) ? rows : []).filter(
+          (r: any) => r && typeof r.id === 'string' && typeof r.cwd === 'string',
+        );
+        const historyInit: Record<string, SessionHistoryEntry[]> = {};
+        const activityInit: Record<string, ActivityItem[]> = {};
+        for (const r of rawRooms) {
+          historyInit[r.id] = parseSessionHistory(r.sessionHistory);
+          activityInit[r.id] = parseActivityHistory(r.activityHistory);
+        }
         const results = await Promise.allSettled(
           restored.map((room) =>
             bridge.setRoomPolicy({
@@ -925,6 +1067,8 @@ export default function App() {
           setNotice('Could not restore agent creation policy. Affected rooms are set to off.');
         setRooms(ready);
         setSelected(ready[0]?.id || '');
+        setSessionHistoryByRoom(historyInit);
+        setActivityByRoom(activityInit);
         canPersist.current = true;
       })
       .catch(() =>
@@ -985,12 +1129,22 @@ export default function App() {
                       name: created.name,
                       status: created.status,
                       transcript: [],
+                      createdAt: Date.now(),
+                      ...(created.providerSessionId
+                        ? { providerSessionId: created.providerSessionId }
+                        : {}),
                     },
                   ],
                 },
           ),
         );
-        appendActivity(created.name + ' managed session created.', 'system', event.roomId);
+        appendActivity(
+          created.name +
+            ' managed session created' +
+            (created.providerSessionId ? ' (resumed).' : '.'),
+          'system',
+          event.roomId,
+        );
         return;
       }
       const owner = roomsRef.current.find((r) => r.id === event.roomId);
@@ -1019,7 +1173,13 @@ export default function App() {
                   if (event.type === 'output' && event.text)
                     return appendTranscript(session, 'agent', event.text, event.taskId);
                   if (event.type === 'task-completed') {
-                    const idleSession: ManagedSession = { ...session, status: 'idle' };
+                    const idleSession: ManagedSession = {
+                      ...session,
+                      status: 'idle',
+                      // Captured only from the provider's own reported id (see decisions.md);
+                      // it lets a later "Resume" ask the provider CLI to resume this session.
+                      ...(event.providerSessionId ? { providerSessionId: event.providerSessionId } : {}),
+                    };
                     if (!event.usage) return idleSession;
                     const withTotal: ManagedSession = {
                       ...idleSession,
@@ -1127,8 +1287,8 @@ export default function App() {
   }, [bridge, appendActivity, appendOutputActivity]);
   useEffect(() => {
     if (!bridge || loadingState || !canPersist.current) return;
-    const metadata = rooms.map(
-      ({
+    const metadata = rooms.map((room) => {
+      const {
         id: roomId,
         name,
         cwd,
@@ -1138,7 +1298,8 @@ export default function App() {
         preapproveRoomTools,
         columns,
         columnWeights,
-      }) => ({
+      } = room;
+      return {
         id: roomId,
         name,
         cwd,
@@ -1148,8 +1309,17 @@ export default function App() {
         preapproveRoomTools,
         columns,
         columnWeights,
-      }),
-    );
+        // Ended-session metadata only (id/name/provider/kind/timestamps/final state, and the
+        // opaque providerSessionId when present) — never terminal output or an agent transcript.
+        sessionHistory: mergedSessionHistory(room),
+        // Short lifecycle/delegation/permission-denied labels only. Entries carrying a streamed
+        // output preview (streamKey set) are excluded — those are agent output, not a label.
+        activityHistory: (activityByRoom[roomId] || [])
+          .filter((item) => !item.streamKey)
+          .map(({ id, text, time, kind }) => ({ id, text, time, kind }))
+          .slice(-MAX_ACTIVITY_HISTORY),
+      };
+    });
     const signature = JSON.stringify(metadata);
     if (signature !== lastSavedMetadata.current) {
       lastSavedMetadata.current = signature;
@@ -1158,7 +1328,7 @@ export default function App() {
         setNotice('Could not save rooms. Your running sessions are still available.');
       });
     }
-  }, [rooms, bridge, loadingState]);
+  }, [rooms, bridge, loadingState, sessionHistoryByRoom, activityByRoom, mergedSessionHistory]);
   const current = rooms.find((r) => r.id === selected);
   async function addRoom() {
     if (!bridge) {
@@ -1215,7 +1385,13 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [bridge]);
-  async function addSession(provider: Provider, kind: Session['kind']) {
+  async function addSession(
+    provider: Provider,
+    kind: Session['kind'],
+    // Set only when resuming a previously-ended managed session (see resumeManagedSession):
+    // an opaque provider session/thread id, never a credential (doc/decisions.md).
+    providerSessionId?: string,
+  ) {
     if (!current) return;
     setPicker(false);
     if (!bridge) {
@@ -1241,6 +1417,7 @@ export default function App() {
           provider: provider as AgentProvider,
           cwd,
           name,
+          ...(providerSessionId ? { providerSessionId } : {}),
         });
         setRooms((prev) =>
           prev.map((r) =>
@@ -1257,6 +1434,10 @@ export default function App() {
                       name: created.name,
                       status: created.status,
                       transcript: [],
+                      createdAt: Date.now(),
+                      ...((created.providerSessionId || providerSessionId)
+                        ? { providerSessionId: created.providerSessionId || providerSessionId }
+                        : {}),
                     },
                   ],
                 },
@@ -1264,7 +1445,7 @@ export default function App() {
         );
         setTarget(created.id);
       } catch (error) {
-        setNotice('Could not connect agent: ' + String(error));
+        setNotice('Could not ' + (providerSessionId ? 'resume' : 'connect') + ' agent: ' + String(error));
       }
       return;
     }
@@ -1275,7 +1456,7 @@ export default function App() {
               ...r,
               sessions: [
                 ...r.sessions,
-                { id: sessionId, kind: 'terminal', provider, name, status: 'running' },
+                { id: sessionId, kind: 'terminal', provider, name, status: 'running', createdAt: Date.now() },
               ],
             }
           : r,
@@ -1322,7 +1503,10 @@ export default function App() {
     setRooms((prev) =>
       prev.map((r) => ({ ...r, sessions: r.sessions.filter((s) => s.id !== session.id) })),
     );
-    if (owner) appendActivity(session.name + ' closed.', 'system', owner.id);
+    if (owner) {
+      recordSessionEnded(owner.id, session, inferFinalState(session));
+      appendActivity(session.name + ' closed.', 'system', owner.id);
+    }
   }
   const focusSession = useCallback((id: string) => {
     document.getElementById('pane-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1442,7 +1626,27 @@ export default function App() {
       );
     setRooms((prev) => prev.filter((r) => r.id !== room.id));
     setSelected(rooms.find((r) => r.id !== room.id)?.id || '');
+    setSessionHistoryByRoom((prev) => {
+      const { [room.id]: _removed, ...rest } = prev;
+      return rest;
+    });
+    setActivityByRoom((prev) => {
+      const { [room.id]: _removed, ...rest } = prev;
+      return rest;
+    });
   }
+  function clearHistory(room: Room) {
+    setSessionHistoryByRoom((prev) => ({ ...prev, [room.id]: [] }));
+    setActivityByRoom((prev) => ({ ...prev, [room.id]: [] }));
+    appendActivity('History cleared.', 'system', room.id);
+  }
+  // Ended sessions only: a session still live in this room's current pane list is never shown
+  // here, even if a stale disk snapshot still has an entry for it (see mergedSessionHistory).
+  const sessionHistory = current
+    ? (sessionHistoryByRoom[current.id] || []).filter(
+        (entry) => !current.sessions.some((s) => s.id === entry.id),
+      )
+    : [];
   const activity = current ? activityByRoom[current.id] || [] : [];
   // Keep the newest activity in view (a live run appends many items), but never
   // yank the list away from someone who scrolled up to read older entries.
@@ -2194,6 +2398,65 @@ export default function App() {
                     >
                       ＋ Add your first session
                     </button>
+                  </div>
+                )}
+                {sessionHistory.length > 0 && (
+                  <div className="session-history">
+                    <div className="session-history-head">
+                      <span className="section-overline">RECOVERY</span>
+                      <h3>Session history</h3>
+                      <button
+                        type="button"
+                        className="subtle-button"
+                        aria-label={'Clear history for ' + current.name}
+                        onClick={() => clearHistory(current)}
+                      >
+                        Clear history
+                      </button>
+                    </div>
+                    <ul className="session-history-list">
+                      {sessionHistory
+                        .slice()
+                        .reverse()
+                        .map((entry) => (
+                          <li key={entry.id} className="session-history-row">
+                            <span className={'provider-mark ' + entry.provider}>
+                              {providerMark(entry.provider)}
+                            </span>
+                            <span className="session-history-name">{entry.name}</span>
+                            <span className="session-history-state">{'ended · ' + entry.finalState}</span>
+                            <time>
+                              {new Date(entry.endedAt).toLocaleString([], {
+                                dateStyle: 'short',
+                                timeStyle: 'short',
+                              })}
+                            </time>
+                            {entry.kind === 'terminal' ? (
+                              <button
+                                type="button"
+                                className="subtle-button"
+                                aria-label={'Reopen ' + entry.name}
+                                onClick={() => void addSession(entry.provider, 'terminal')}
+                              >
+                                Reopen
+                              </button>
+                            ) : entry.providerSessionId ? (
+                              <button
+                                type="button"
+                                className="subtle-button"
+                                aria-label={'Resume ' + entry.name}
+                                onClick={() =>
+                                  void addSession(entry.provider, 'managed', entry.providerSessionId)
+                                }
+                              >
+                                Resume
+                              </button>
+                            ) : (
+                              <span className="session-history-no-resume">No resume data</span>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
                   </div>
                 )}
                 <div className="workspace-hint">

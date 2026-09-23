@@ -121,7 +121,7 @@ const path = require('node:path');
           cwd: process.cwd(),
           queue: [],
           active: null,
-          providerSessionId: null,
+          providerSessionId: value.providerSessionId || null,
           token: null,
         });
       }, session);
@@ -704,9 +704,72 @@ const path = require('node:path');
       'The app must not need horizontal scroll/clip at the 860px minimum width',
     );
     await page.screenshot({ path: 'doc/screenshots/activity-panel-860.png' });
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].setSize(1280, 820);
+    });
+    await page.waitForTimeout(150);
+
+    // Persisted session history + Resume, in a fresh isolated room (so it never disturbs the
+    // session ordering/counts the column-layout assertions above depend on). Never calls
+    // runAgentTask/a real provider turn — createAgentSession only registers session metadata,
+    // it never spawns or bills a model turn.
+    await page.getByRole('button', { name: 'New room' }).click();
+    await page.getByRole('heading', { name: 'This room is ready.' }).waitFor();
+    const historyRoomId = await page.evaluate(async () => {
+      const state = await window.rooms.loadState();
+      return state.rooms.at(-1).id;
+    });
+    const resumable = {
+      id: 'synthetic-resumable',
+      roomId: historyRoomId,
+      provider: 'claude',
+      name: 'Claude resumable',
+      status: 'idle',
+      providerSessionId: 'demo-provider-session-abc123',
+    };
+    await registerRealSession(resumable);
+    await send({ type: 'session-created', sessionId: resumable.id, roomId: historyRoomId, session: resumable });
+    await page.getByText('Claude resumable', { exact: true }).first().waitFor();
+
+    // Closing it records ended-session metadata (never a transcript) with the opaque
+    // providerSessionId preserved, and shows a Resume action (never Reopen — that's terminal-only).
+    await page.locator('#pane-synthetic-resumable .close-pane').click();
+    await page.waitForFunction(() => !document.querySelector('#pane-synthetic-resumable'));
+    const resumeRow = page.locator('.session-history-row', { hasText: 'Claude resumable' });
+    await resumeRow.waitFor();
+    await resumeRow.locator('.session-history-state', { hasText: 'ended · stopped' }).waitFor();
+    const resumeButton = resumeRow.getByRole('button', { name: /Resume/ });
+    await resumeButton.waitFor();
+    assert.equal(
+      await resumeRow.getByRole('button', { name: /Reopen/ }).count(),
+      0,
+      'A managed session history row must offer Resume, never Reopen',
+    );
+
+    // Resume: a brand-new engine session is created, seeded with the same opaque
+    // providerSessionId, so the provider's own CLI resumes that conversation on its next task.
+    await resumeButton.click();
+    await page.getByText('Claude resumable', { exact: true }).first().waitFor();
+    await page.getByText(/Claude resumable managed session created \(resumed\)\./, { exact: false }).waitFor();
+    const resumedProviderSessionId = await page.evaluate(async (roomId) => {
+      const state = await window.rooms.loadState();
+      const room = (state.rooms || []).find((r) => r.id === roomId);
+      const resumed = (room?.sessionHistory || []).find((e) => e.id === 'synthetic-resumable');
+      return resumed?.providerSessionId;
+    }, historyRoomId);
+    assert.equal(
+      resumedProviderSessionId,
+      'demo-provider-session-abc123',
+      'The opaque providerSessionId round-trips through persisted session history',
+    );
+
+    // Clear history removes the recovery list for this room (the resumed session itself is
+    // live, not history, so nothing else in this room is affected).
+    await page.getByRole('button', { name: /Clear history for/ }).click();
+    await page.locator('.session-history').waitFor({ state: 'detached' });
 
     console.log(
-      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), safe Markdown transcript rendering (incl. inert script/img), provider-reported usage display and running totals, resizable/keyboard-accessible column layout with persistence, and layout at the minimum window width.',
+      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), safe Markdown transcript rendering (incl. inert script/img), provider-reported usage display and running totals, resizable/keyboard-accessible column layout with persistence, layout at the minimum window width, and persisted session history with Resume (opaque providerSessionId round-trip, synthetic engine, no real provider call).',
     );
   } finally {
     if (app) await app.close();

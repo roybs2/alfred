@@ -825,6 +825,69 @@ button {
     monospace;
   pointer-events: none;
 }
+.session-history {
+  border: 1px solid #28262e;
+  border-radius: 10px;
+  background: #17161c;
+  padding: 12px 14px;
+  margin-top: 12px;
+  flex: 0 0 auto;
+}
+.session-history-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.session-history-head h3 {
+  margin: 0;
+  font-size: 12px;
+  color: #d8d3e0;
+}
+.session-history-head .subtle-button {
+  margin-left: auto;
+}
+.session-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.session-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #b7b0c0;
+  padding: 4px 0;
+  border-bottom: 1px solid #211f27;
+}
+.session-history-row:last-child {
+  border-bottom: none;
+}
+.session-history-name {
+  flex: 1 1 auto;
+  color: #e4e0ea;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-history-state {
+  color: #8a8590;
+  font-size: 10px;
+}
+.session-history-row time {
+  color: #6f6a78;
+  font-size: 10px;
+}
+.session-history-no-resume {
+  color: #6f6a78;
+  font-size: 10px;
+}
 .workspace-hint {
   height: 40px;
   flex: 0 0 40px;

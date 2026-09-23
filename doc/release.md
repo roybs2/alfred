@@ -181,3 +181,7 @@ To open it anyway:
   is not part of this build script.
 - **Large app size (~300+ MB per architecture)** is inherent to bundling Electron/Chromium and is
   not specific to this packaging config.
+
+## Native module note
+
+Building the x64 target rebuilds `node_modules/node-pty` for x86_64, which breaks local `npm run dev` / `npm run test:smoke` on Apple Silicon (`posix_spawnp failed`). `npm run dist:mac` therefore runs `postdist:mac` (`electron-rebuild -f -w node-pty`) to restore the host build. If you invoke `electron-builder` directly, run that command afterwards.

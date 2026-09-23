@@ -29,6 +29,21 @@ function nonempty(value, label, max = MAX_TEXT) {
   return value;
 }
 
+// A provider session/thread id (Claude session_id, Codex thread_id, Cursor session id) is an
+// opaque handle used only to ask the provider's own CLI to resume — never parsed, displayed as a
+// secret, or treated as a credential. Still validated narrowly: short, printable, single-line.
+function safeOpaqueId(value, label, max = 400) {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    !value.length ||
+    value.length > max ||
+    /[\0\r\n\t]/.test(value)
+  )
+    throw new TypeError(`Invalid ${label}`);
+  return value;
+}
+
 class AgentEngine {
   constructor({ runner, emit = () => {}, timeoutMs = TASK_TIMEOUT_MS, bridge = null }) {
     this.runner = runner;
@@ -57,11 +72,16 @@ class AgentEngine {
     return { roomId, ...room.policy };
   }
 
-  createSession({ roomId, provider, cwd, name }, { spawnedBy = null } = {}) {
+  // providerSessionId: an opaque id from a prior run of this same provider (e.g. after a restart),
+  // used only to ask the provider CLI to resume that conversation on the next task. It is never
+  // required, never a credential, and a session created with one still starts idle — nothing runs
+  // until a task is submitted.
+  createSession({ roomId, provider, cwd, name, providerSessionId } = {}, { spawnedBy = null } = {}) {
     nonempty(roomId, 'room id', 80);
     if (!PROVIDERS.includes(provider)) throw new TypeError('Invalid provider');
     nonempty(cwd, 'working directory', 4096);
     if (name !== undefined) nonempty(name, 'agent name', 80);
+    const safeProviderSessionId = safeOpaqueId(providerSessionId, 'provider session id');
     const room = this.rooms.get(roomId) || { cwd: null, policy: { allowSpawn: false, maxAgents: 4, preapproveRoomTools: false } };
     if (room.cwd && room.cwd !== cwd) throw new Error('Room working directory mismatch');
     if (spawnedBy && !room.policy.allowSpawn) throw new Error('Room agent spawning is disabled');
@@ -71,7 +91,8 @@ class AgentEngine {
     this.rooms.set(roomId, room);
     const id = crypto.randomUUID();
     const session = { id, roomId, provider, name: name || `${PROVIDER_LABELS[provider]} ${id.slice(0, 8)}`, status: 'idle' };
-    const item = { ...session, cwd, queue: [], active: null, providerSessionId: null, token: null };
+    if (safeProviderSessionId) session.providerSessionId = safeProviderSessionId;
+    const item = { ...session, cwd, queue: [], active: null, providerSessionId: safeProviderSessionId || null, token: null };
     this.sessions.set(id, item);
     this.emit({ type: 'session-created', sessionId: id, roomId, session });
     return session;
@@ -173,7 +194,16 @@ class AgentEngine {
       session.providerSessionId = result.providerSessionId;
       this.finish(task, null, result.text);
       // usage is included only when the provider actually reported it (see agent-runner.cjs usageFrom); never estimated.
-      const completed = { type: 'task-completed', sessionId: session.id, roomId: session.roomId, taskId: task.id, text: result.text };
+      // providerSessionId is always included here (checked above): it is the opaque handle the
+      // renderer needs to offer "Resume" for this session after a restart.
+      const completed = {
+        type: 'task-completed',
+        sessionId: session.id,
+        roomId: session.roomId,
+        taskId: task.id,
+        text: result.text,
+        providerSessionId: result.providerSessionId,
+      };
       if (usage) completed.usage = usage;
       this.emit(completed);
     } catch (error) {

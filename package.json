@@ -16,7 +16,8 @@
     "test:smoke": "npm run build && node tests/smoke.cjs",
     "test:smoke:managed": "npm run build && node tests/managed-ui-smoke.cjs",
     "format": "prettier --write src desktop tests vite.config.ts",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "postdist:mac": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -72,8 +73,20 @@
       "identity": null,
       "category": "public.app-category.developer-tools",
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.icns",
       "hardenedRuntime": false,

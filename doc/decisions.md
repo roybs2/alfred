@@ -81,8 +81,18 @@ The runner's resolved result gains an optional `usage: { costUsd?, inputTokens?,
 
 Electron derives the default userData directory from the app name; adding `productName: "Alfred"` moves that directory. `desktop/main.cjs` now migrates `project-state.json` from the previous `agent-rooms` userData directory into the new one on first launch when the new directory has no saved state yet, so existing rooms are not lost. Covered by backend tests in `tests/backend.test.cjs`.
 
+### Persisted session/activity history: metadata and labels only, never transcripts (owner decision, 2026-09-22)
+
+Restart recovery needed some record of what happened before quitting, without storing anything sensitive. Two new persisted-per-room fields, both bounded and sanitized at the `rooms:save-state` IPC boundary in `desktop/main.cjs` (defense in depth, independent of what the renderer sends):
+
+- **`sessionHistory`** (cap 50 per room, oldest dropped first): one entry per session that has ended — `id`, `name`, `provider`, `kind` (`terminal`/`managed`), `createdAt`, `endedAt`, `finalState` (`exited`/`stopped`/`failed`/`completed`), and optionally `providerSessionId`. No terminal output, no agent transcript, no task text.
+- **`activityHistory`** (cap 200 per room, oldest dropped first, each `text` capped at 300 chars): the same short lifecycle/delegation/permission-denied labels already shown live in Room Activity (e.g. "Codex child completed a task.", "Delegation: A → B"). Room Activity entries that embed agent output snippets (streamed output preview) are excluded from what gets persisted — only label-only entries are saved.
+
+**`providerSessionId` is an opaque provider handle, not a credential.** It is Claude's `session_id`, Codex's `thread_id`, or Cursor's session id — an identifier the provider's own CLI uses to resume a conversation, not a secret, API key, or transcript. It is validated as a short, single-line, printable string (`desktop/agent-engine.cjs` `safeOpaqueId`) and is never parsed or displayed as sensitive. Storing it lets a managed session's "Resume" action call the new `AgentEngine.createSession({ ..., providerSessionId })` so the provider itself resumes context — Alfred never reconstructs or rewrites that context.
+
+On restart, all sessions are shown as `ended` (their persisted `finalState`), never as `running`/`idle`, since no PTY or provider process actually survives a restart. Managed entries with a `providerSessionId` get a **Resume** action (creates a new engine session seeded with that id — the next task uses the provider's own `--resume`/equivalent). Terminal entries get a **Reopen** action (a new shell in the same working directory; no scrollback/transcript is restored, since none was ever stored). A **Clear history** action per room removes both fields for that room.
+
 ## Open questions
 
 - Which officially documented Claude Code and Codex interfaces, if any, provide stable structured session or delegation control?
-- What exact room and session metadata should survive restart?
 - Which macOS versions and distribution channel will be supported first?

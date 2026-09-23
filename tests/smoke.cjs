@@ -104,17 +104,45 @@ const assert = require('node:assert/strict');
     await page.keyboard.type("printf 'SECOND_%s_OK\\n' SESSION");
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => window.__smokeOutput.includes('SECOND_SESSION_OK'));
+
+    // Recovery/history: explicitly closing a terminal session records it as "ended" (never
+    // "running"/"idle") in a Session history list, with a Reopen action — metadata only, no
+    // transcript restore.
+    await page.locator('.terminal-card').first().locator('.close-pane').click();
+    await page.waitForFunction(() => document.querySelectorAll('.terminal-card').length === 1);
+    const closedHistoryRow = page.locator('.session-history-row', { hasText: 'ended · stopped' });
+    await closedHistoryRow.waitFor();
+    await closedHistoryRow.getByRole('button', { name: /Reopen/ }).waitFor();
+
     await app.evaluate(({ dialog }) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: ['/tmp'] });
     });
     await page.getByRole('button', { name: 'Create room and choose a folder' }).click();
     await page.getByRole('heading', { name: 'This room is ready.' }).waitFor();
     assert.equal(await page.locator('.terminal-card:visible').count(), 0);
+
+    // Open a terminal in this second room ("tmp") and leave it running (never explicitly
+    // closed) — quitting with it still open must still show it as "ended" after restart,
+    // since no PTY survives a restart either way (see doc/decisions.md).
+    await page.getByRole('button', { name: /Add session/ }).click();
+    await page
+      .locator('.picker-menu')
+      .getByRole('button', { name: /Terminal/ })
+      .click();
+    // Scoped to the current room's visible pane: the previous room's terminal stays mounted
+    // (but hidden) in the background, so an unscoped `.terminal-card` would match both.
+    await page.locator('.terminal-card:visible').waitFor();
+    await page.waitForFunction(() =>
+      document
+        .querySelector('.pane-anchor:not(.pane-hidden) .terminal-card')
+        ?.textContent?.includes('running'),
+    );
+
     await page.getByRole('button', { name: 'Open room agent-rooms', exact: true }).click();
     assert.equal(
       await page.locator('.terminal-card:visible').count(),
-      2,
-      'Terminals survive room switch',
+      1,
+      'The remaining terminal survives room switch',
     );
     const state = await page.evaluate(() => window.rooms.loadState());
     assert(Array.isArray(state.rooms) && state.rooms.length === 2, 'Room metadata must persist');
@@ -123,7 +151,9 @@ const assert = require('node:assert/strict');
     await page.getByRole('button', { name: 'Room options' }).click();
     await page.getByRole('button', { name: 'Remove room', exact: true }).click();
     await page.getByRole('button', { name: /Confirm remove/ }).click();
-    await page.waitForFunction(() => document.querySelectorAll('.terminal-card').length === 0);
+    // Only the "tmp" room's terminal remains (left running on purpose, see above) — "agent-rooms"
+    // and its own terminal are gone.
+    await page.waitForFunction(() => document.querySelectorAll('.terminal-card').length === 1);
     await app.close();
     app = await electron.launch({
       args: [path.resolve('.')],
@@ -136,8 +166,27 @@ const assert = require('node:assert/strict');
       0,
       'Restart restores metadata, not fictitious live sessions',
     );
+
+    // The "tmp" room's terminal, left running when the app quit, now shows as ended (never
+    // running/idle) with a Reopen action; clicking it opens a real new terminal (no transcript
+    // is restored — none was ever stored).
+    await restored.getByRole('button', { name: 'Open room tmp', exact: true }).click();
+    const restoredHistoryRow = restored.locator('.session-history-row', { hasText: 'ended · stopped' });
+    await restoredHistoryRow.waitFor();
+    await restoredHistoryRow.getByRole('button', { name: /Reopen/ }).click();
+    await restored.locator('.terminal-card').waitFor();
+    await restored.waitForFunction(() =>
+      document.querySelector('.terminal-card')?.textContent?.includes('running'),
+    );
+
+    // Clear history removes the recovery list for this room.
+    await restored.getByRole('button', { name: /Clear history/ }).click();
+    await restored.locator('.session-history').waitFor({ state: 'detached' });
+
     console.log(
-      'PASS: desktop boot, real PTY I/O, resize, close, provider validation, two UI terminals, manual paste without submission, room switching, removal, and restart persistence.',
+      'PASS: desktop boot, real PTY I/O, resize, close, provider validation, two UI terminals, ' +
+        'manual paste without submission, room switching, removal, restart persistence, and ' +
+        'session history (ended sessions, reopen, clear history).',
     );
   } finally {
     if (app) await app.close();

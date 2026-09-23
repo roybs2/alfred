@@ -236,6 +236,153 @@ test('project state round-trips and rejects values above the storage bound', asy
   }
 });
 
+test('persisted session/activity history round-trips valid entries and enforces bounds', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const sessionHistory = Array.from({ length: 60 }, (_, i) => ({
+      id: 's' + i,
+      name: 'Session ' + i,
+      provider: 'claude',
+      kind: i % 2 === 0 ? 'managed' : 'terminal',
+      createdAt: 1000 + i,
+      endedAt: 2000 + i,
+      finalState: 'exited',
+      ...(i % 2 === 0 ? { providerSessionId: 'prov-session-' + i } : {}),
+    }));
+    const activityHistory = Array.from({ length: 250 }, (_, i) => ({
+      id: 'a' + i,
+      text: 'Activity label ' + i,
+      time: 3000 + i,
+      kind: 'system',
+    }));
+    const state = { rooms: [{ id: 'room-1', name: 'Room 1', cwd: '/tmp', sessionHistory, activityHistory }] };
+    h.invoke('rooms:save-state', state);
+    const loaded = h.invoke('rooms:load-state');
+    const room = loaded.rooms[0];
+    // Oldest dropped first: bounded arrays keep the most recently appended entries.
+    assert.equal(room.sessionHistory.length, 50);
+    assert.equal(room.sessionHistory[0].id, 's10');
+    assert.equal(room.sessionHistory.at(-1).id, 's59');
+    // Odd ids never had a providerSessionId to begin with.
+    assert.equal(room.sessionHistory.find((e) => e.id === 's11').providerSessionId, undefined);
+    assert.equal(room.sessionHistory.find((e) => e.id === 's58').providerSessionId, 'prov-session-58');
+    assert.equal(room.activityHistory.length, 200);
+    assert.equal(room.activityHistory[0].id, 'a50');
+    assert.equal(room.activityHistory.at(-1).id, 'a249');
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
+test('persisted history strips entries that carry transcript/task text or unknown fields', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const state = {
+      rooms: [
+        {
+          id: 'room-1',
+          sessionHistory: [
+            // Valid entry.
+            {
+              id: 'ok',
+              name: 'Fine',
+              provider: 'codex',
+              kind: 'managed',
+              createdAt: 1,
+              endedAt: 2,
+              finalState: 'stopped',
+            },
+            // A smuggled transcript-like field must drop the whole entry.
+            {
+              id: 'bad',
+              name: 'Bad',
+              provider: 'codex',
+              kind: 'managed',
+              createdAt: 1,
+              endedAt: 2,
+              finalState: 'stopped',
+              transcript: ['secret agent output'],
+            },
+            // Unknown final state must drop the entry.
+            {
+              id: 'bad2',
+              name: 'Bad2',
+              provider: 'codex',
+              kind: 'managed',
+              createdAt: 1,
+              endedAt: 2,
+              finalState: 'running',
+            },
+          ],
+          activityHistory: [
+            { id: 'ok', text: 'Session started.', time: 1, kind: 'system' },
+            // Task-text-length activity text must drop the entry (activity labels are short).
+            { id: 'bad', text: 'x'.repeat(301), time: 1, kind: 'system' },
+            // Unknown kind must drop the entry.
+            { id: 'bad2', text: 'Fine text', time: 1, kind: 'transcript' },
+          ],
+        },
+      ],
+    };
+    h.invoke('rooms:save-state', state);
+    const room = h.invoke('rooms:load-state').rooms[0];
+    // Compared via JSON (rather than assert.deepEqual) because the loaded array comes back
+    // from a separate vm realm inside this test harness; only its serialized shape matters.
+    assert.equal(JSON.stringify(room.sessionHistory.map((e) => e.id)), JSON.stringify(['ok']));
+    assert.equal(JSON.stringify(room.activityHistory.map((e) => e.id)), JSON.stringify(['ok']));
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
+test('save-state writes atomically (temp file renamed, no partial file left on disk)', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    h.invoke('rooms:save-state', { rooms: [{ id: 'a' }] });
+    const files = fs.readdirSync(h.userData);
+    assert.deepEqual(files, ['project-state.json']);
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
+test('engine createSession accepts an opaque providerSessionId for resume and validates it', async () => {
+  const { AgentEngine } = require(path.join(__dirname, '..', 'desktop', 'agent-engine.cjs'));
+  const engine = new AgentEngine({ runner: { run: async () => ({}) }, emit: () => {} });
+  engine.setRoomPolicy({ roomId: 'r1', allowSpawn: false, maxAgents: 4, preapproveRoomTools: false });
+  const session = engine.createSession({
+    roomId: 'r1',
+    provider: 'claude',
+    cwd: '/tmp',
+    providerSessionId: 'abc-123-session',
+  });
+  assert.equal(session.providerSessionId, 'abc-123-session');
+  assert.equal(engine.sessions.get(session.id).providerSessionId, 'abc-123-session');
+  assert.throws(
+    () =>
+      engine.createSession({
+        roomId: 'r1',
+        provider: 'claude',
+        cwd: '/tmp',
+        providerSessionId: 'bad\nid',
+      }),
+    /provider session id/,
+  );
+  assert.throws(
+    () =>
+      engine.createSession({
+        roomId: 'r1',
+        provider: 'claude',
+        cwd: '/tmp',
+        providerSessionId: '',
+      }),
+    /provider session id/,
+  );
+});
+
 test('renaming to Alfred migrates saved rooms from the old agent-rooms userData directory', async () => {
   const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-old-userdata-'));
   const state = { project: 'preserved', rooms: [{ id: 'kept' }] };
