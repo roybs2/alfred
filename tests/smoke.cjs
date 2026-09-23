@@ -122,6 +122,7 @@ const assert = require('node:assert/strict');
     await page.screenshot({ path: 'doc/screenshots/workspace.png' });
     await page.getByRole('button', { name: 'Room options' }).click();
     await page.getByRole('button', { name: 'Remove room', exact: true }).click();
+    await page.getByRole('button', { name: /Confirm remove/ }).click();
     await page.waitForFunction(() => document.querySelectorAll('.terminal-card').length === 0);
     await app.close();
     app = await electron.launch({

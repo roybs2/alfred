@@ -29,7 +29,13 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 - [x] Record Codex queue/agents/app-server and Claude background/attach/logs/stop paths.
 - [x] Read official App Server and Agent SDK overview; document authentication caveat.
 - [ ] Manually validate Claude and Codex interactive sessions with the user's chosen authentication. Detection is verified; model work has not been exercised by the smoke test.
-- [ ] Verify owned session identity, message delivery acknowledgement, completion, cancellation, and busy-session behavior.
+- [x] Live-verify (2026-09-22) Claude managed path: bridge init status, session id, resume, headless room_send delivery to Codex, permission-denial behavior under default mode. Evidence in adapters.md.
+- [x] Live-verify Codex required-bridge startup/failure and JSONL event parsing; live-verify cancellation (SIGTERM, bridge grandchild gone, task-failed).
+- [x] Fix: Claude runner aborts at init when the room bridge failed/missing (was letting a billable turn run); Codex runner surfaces inner API error text and maps required-bridge startup failure.
+- [x] Add explicit off-by-default "Pre-approve room tools" room policy (scoped Claude --allowedTools / Codex per-tool approval_mode; Codex enabled_tools limited to room tools). Unit and managed UI smoke tests.
+- [ ] Live-verify a successful Codex turn, `codex exec resume`, Codex-initiated room_send, and that pre-approval suppresses denials (blocked: configured Codex model needs newer CLI; account usage limit).
+- [ ] Surface provider permission denials as visible activity events.
+- [ ] Verify owned session identity, message delivery acknowledgement, busy-session behavior, delegated-call cancellation, and room_spawn against real providers.
 - [ ] Prove whether native subagent delegation can be redirected to another provider. Do not infer this from CLI launch or queue support.
 
 ## Next — native-friendly collaboration
@@ -52,6 +58,11 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 - [ ] Define supported macOS versions and Intel/Apple Silicon release coverage.
 - [ ] Signed/notarized installer, updates and clean-machine installation checks.
 - [ ] Select final name and license with owner; no public repository or release has been published.
+
+## Post-MVP (owner requests, 2026-09-22)
+
+- [ ] Keyboard shortcuts for common actions, configurable in a Settings view (persist bindings only; no conflicts with terminal input).
+- [ ] Open many terminals/agents in one room at once, with a focus mode that minimizes everything except the room (sidebar/activity collapsed, sessions tiled).
 
 ## Verification commands
 

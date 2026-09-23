@@ -45,3 +45,46 @@ SDK/app-server integrations differ from launching an already installed local CLI
 Provider interfaces and terms change over time. Before implementing an adapter, consult current official documentation and record the date, exact supported protocol, authentication path, event semantics, and any preview/beta status. SDKs may support building applications on a model API without controlling an existing interactive CLI; an app-server may expose a protocol without supporting arbitrary cross-provider delegation. Verify each required action rather than relying on product naming.
 
 At the time this doc was created, local CLI help has verified the existence of potentially useful Codex session queue/browse commands and Claude background session lifecycle commands. Their end-to-end integration has not been verified in this repository. Native cross-provider delegation, delegation redirects, and hidden context transfer are not implemented and must not be described as available.
+
+## Live verification 2026-09-22
+
+Owner-authorized minimal live runs of the managed-agent path (`AgentEngine` + `BridgeBroker` + `room-mcp-bridge.mjs` + `cliRunner`) against the real provider CLIs, driven by a scratch harness outside the repository that requires the real `desktop/agent-engine.cjs` and `desktop/agent-runner.cjs`. Environment: Claude Code 2.1.280, codex-cli 0.149.1, Node v26.3.0 as the bridge executable, macOS, a fresh `git init`'d temporary directory as the room cwd, the user's existing sign-in. Parent Claude Code session variables were removed from the child environment to mimic a GUI launch. No permission-bypass flag was passed. Evidence below is event types, IDs, and timings only; no transcripts were stored in the repository.
+
+### Claude Code: verified
+
+- **Single turn.** Spawned `claude -p --input-format text --output-format stream-json --verbose --include-partial-messages --mcp-config <json> --strict-mcp-config`. Event order: `system/hook_started` ×2, `system/hook_response` ×2 (the user's own hooks), `system/init`, `system/status`, `stream_event` deltas, `assistant`, `rate_limit_event`, `result/success`. Task completed in about 3.6 s with the result `OK` and captured session id `94d0d3c4-…`.
+- **`system/init` shape matches the parser.** `mcp_servers` is `[{ name, status, source }]`, for example `{ name: "agent_rooms_<session uuid with _>", status: "connected", source: "dynamic" }`. `--strict-mcp-config` loaded only the room bridge. `tools` listed only `mcp__agent_rooms_…__room_send` and `…__room_spawn` from MCP. `permissionMode` reported the user's setting (`auto`). No `mcp_server_errors` key was present, so that branch of the parser is defensive only.
+- **Failed bridge.** With `/usr/bin/false` as the bridge command, init reported `status: "failed"` and an empty `tools` list. The runner used to wait for the full model turn before failing. It now kills the process at init, before any assistant event (see the fixes below).
+- **Resume.** A second task on the same managed session spawned the same argv plus `--resume 94d0d3c4-…`. Init and result both reported the same `session_id`, and the task completed in about 3.9 s.
+- **Cross-provider `room_send` (Claude to Codex), under the user's `permissionMode: auto`.** Claude found the deferred tool through `ToolSearch` and called `mcp__agent_rooms_…__room_send` with `{to: "Codex", task: "Reply with the word OK and nothing else."}`. `result.permission_denials` was empty, so the call was permitted. The engine emitted `delegation` (`Claude → Codex`), then created and ran a Codex task containing the exact provenance header and task text. The Codex child failed on its account usage limit (see below). That failure went back to Claude as an MCP `tool_result` with `is_error: true`, and Claude's own task then completed normally. The whole path was exercised live except a successful Codex reply: Claude to MCP stdio bridge to loopback broker token check to engine to Codex spawn to error propagation.
+- **Cross-provider `room_send` under `--permission-mode default`.** This was a harness-only diagnostic. It is stricter than the user's setting and is not a bypass. The same call was **denied**: the stream emitted `system/permission_denied` ("Claude requested permissions to use mcp__agent_rooms_…__room_send, but you haven't granted it yet."), and `result.permission_denials` listed the tool. **Finding:** headless room collaboration does not work for users whose Claude permission mode prompts for MCP tools unless the room tools are allowed. This led to the scoped pre-approval option described in the decision log.
+
+### Codex: partially verified
+
+- **MCP bridge startup with `required=true`.** Verified. `thread.started` came about 0.5–1.8 s after spawn, and `ps` then showed `node …/desktop/room-mcp-bridge.mjs` as a child of the `codex exec` process. With `/usr/bin/false` as the bridge, Codex exited 1 before `thread.started`, and stderr contained `required MCP servers failed to initialize: agent_rooms_…: handshaking with MCP server failed`. No model request was made.
+- **JSONL parsing.** `thread.started` with `thread_id` (UUIDv7 form, for example `01a0cbf1-12a4-…`), `turn.started`, and non-fatal `item.completed` items with `item.type: "error"` (warnings) were observed. The runner correctly ignores the warning items. Terminal failure appeared as `error` with a `message` string, followed by `turn.failed` with `error.message`.
+- **Not verified: turn completion and resume.** No Codex turn completed.
+  - The user's configured default model (`gpt-6-astra`) is rejected by this CLI version: "requires a newer version of Codex" (HTTP 400).
+  - The harness then pinned the cheaper listed model `gpt-5.6-luna`. This was a harness-only `-c model=…` and the runner never sets a model. Every attempt then failed with "You've hit your usage limit … try again at Sep 23rd, 2026 1:44 AM" (local time).
+  - `turn.completed`, `agent_message` capture, `thread_id` persistence after a successful turn, and `codex exec resume` were therefore not observed live.
+  - Because both turns failed, the runner (correctly) did not store the thread id, and the second task started a new thread instead of resuming.
+- **Codex as the `room_send` caller.** Not run.
+
+### Cancellation: verified
+
+This check used Codex. `stopSession` was called about 2.5 s after spawn, after `thread.started`/`turn.started` and while the child and its bridge grandchild were running. The engine immediately emitted `task-failed` ("Agent session stopped") and `session-stopped`. The child closed with signal `SIGTERM`. After 4.5 s, `kill(pid, 0)` failed and `ps` showed no `room-mcp-bridge` process. Cancellation during a delegated `room_send` was not exercised live; unit tests still cover it.
+
+### Model turns used
+
+- **Claude:** 4 turns that reached the model (single turn, resume, two cross-provider sends). A fifth process was killed at init on the failed-bridge check before any assistant event, so it probably made no model request.
+- **Codex:** 8 `turn.started` attempts, and none produced a model response. Two were rejected with HTTP 400 for the model version, five hit the usage limit, and one was cancelled by the cancellation check. One further run (the failed bridge) never reached a turn.
+
+### Remains
+
+- A successful Codex turn, `codex exec resume` on the same thread, and a Codex-initiated `room_send`. These need a Codex CLI upgrade for the configured model, or an owner-chosen model, and available usage.
+- Live confirmation that the new pre-approval flags actually suppress the denial:
+  - Claude: `--allowedTools mcp__<bridge>__room_send[,room_spawn]`.
+  - Codex: per-tool `approval_mode="approve"`. Only config parsing has been verified, via `codex mcp get --json`, which also rejects unknown variants.
+  - Whether `codex exec` prompts, auto-denies, or auto-allows MCP tool calls without the override is still unknown.
+- Surfacing `permission_denials` / `system/permission_denied` as a visible activity event instead of only in the model's reply text.
+- Delegated-call cancellation, busy-target queueing, and `room_spawn` against real providers.

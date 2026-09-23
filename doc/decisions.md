@@ -24,6 +24,16 @@ The initial handoff path can copy/paste between sessions, but the user must revi
 
 Do not claim native delegation redirects, structured delegation, or cross-provider context transfer until verified in implementation and provider documentation.
 
+### Room tools can be pre-approved only by explicit room policy
+
+Decided 2026-09-22 after live evidence: Claude Code in `-p` mode denies the room bridge's `room_send` under the default permission mode (`system/permission_denied`) but allows it under `auto`.
+
+Rooms have a `preapproveRoomTools` policy flag. It is off by default, shown as "Pre-approve room tools" in the room policy panel, persisted with room metadata, and logged in Room Activity when changed. When it is on, the runner:
+- **Claude:** adds `--allowedTools mcp__<this bridge>__room_send`, plus `…__room_spawn` only when spawning is allowed. These are exact-name documented allow rules for this process's bridge only, with no wildcards. User and managed deny/ask rules still take precedence.
+- **Codex:** adds the documented per-tool override `mcp_servers.<this bridge>.tools.<tool>.approval_mode="approve"` for the same tool names.
+
+The runner always restricts Codex's bridge exposure with `enabled_tools`, so `room_spawn` is only exposed when the room allows it. It never changes the permission mode, sandbox, approval policy, or any other tool's permission, and it never passes bypass flags. Live confirmation of the flags is still pending (see adapters.md).
+
 ### License remains open
 
 The project is intended to be open source, but the owner has not selected a license. Do not invent one or add a license file without that decision.

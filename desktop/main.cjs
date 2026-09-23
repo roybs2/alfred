@@ -5,12 +5,24 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { AgentEngine, BridgeBroker } = require(path.join(__dirname, 'agent-engine.cjs'));
+const { cliRunner } = require(path.join(__dirname, 'agent-runner.cjs'));
 
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_SESSIONS = 12;
 const sessions = new Map();
 let mainWindow;
 let pty;
+const agentEngine = new AgentEngine({
+  runner: cliRunner({
+    executableFor: (provider) => detectAgents().find((agent) => agent.id === provider)?.path,
+    environmentFor: childEnvironment,
+  }),
+  emit: (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rooms:agent-event', event);
+  },
+});
+agentEngine.setBridge(new BridgeBroker(agentEngine));
 const isDev = process.argv.includes('--dev');
 if (process.env.AGENT_ROOMS_TEST_MODE === '1' && process.env.AGENT_ROOMS_TEST_DATA) {
   if (!path.isAbsolute(process.env.AGENT_ROOMS_TEST_DATA))
@@ -190,6 +202,17 @@ handle('rooms:close-session', (id) => {
     item.terminal.kill();
   }
 });
+handle('rooms:create-agent-session', ({ roomId, provider, cwd, name } = {}) => {
+  const workingDirectory = fs.realpathSync(path.resolve(stringArg(cwd, 'working directory')));
+  if (!fs.statSync(workingDirectory).isDirectory())
+    throw new TypeError('Working directory must be a directory');
+  const agent = detectAgents().find((item) => item.id === provider);
+  if (!agent?.available || !agent.path) throw new Error(`${provider} executable was not found`);
+  return agentEngine.createSession({ roomId, provider, cwd: workingDirectory, name });
+});
+handle('rooms:run-agent-task', (options) => agentEngine.runTask(options || {}));
+handle('rooms:stop-agent-session', (id) => agentEngine.stopSession(id));
+handle('rooms:set-room-policy', (options) => agentEngine.setRoomPolicy(options || {}));
 handle('rooms:load-state', () => {
   const file = path.join(app.getPath('userData'), 'project-state.json');
   try {
@@ -222,6 +245,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
+    minWidth: 860,
+    minHeight: 560,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -257,6 +282,7 @@ function createWindow() {
   else mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   mainWindow.on('closed', () => {
     mainWindow = null;
+    agentEngine.stopAll();
     for (const [id, { terminal }] of sessions) {
       sessions.delete(id);
       try {
@@ -268,6 +294,7 @@ function createWindow() {
 
 app.whenReady().then(createWindow);
 app.on('before-quit', () => {
+  agentEngine.stopAll();
   for (const { terminal } of sessions.values()) {
     try {
       terminal.kill();

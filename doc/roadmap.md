@@ -1,6 +1,6 @@
 # Roadmap
 
-Statuses reflect visible code and evidence at the time of the latest update. The initial Electron and React scaffold exists; the terminal foundation is in progress. No milestone should be marked complete solely because it is planned.
+Statuses reflect visible code and evidence at the time of the latest update. Milestone 1 is implemented and tested on the development Mac; distribution remains separate. No milestone should be marked complete solely because it is planned.
 
 ## 0. Capability validation — in progress
 
@@ -8,7 +8,7 @@ Read-only inspection of installed Codex CLI 0.149.1 and Claude Code 2.1.280 help
 
 **Exit:** documented capability matrix with links to provider documentation, verified identity and notification behavior, and clear distinctions between local session control, provider-native delegation, and cross-provider handoff; no unsupported capability claim.
 
-## 1. Local PTY workspace MVP — in progress
+## 1. Local PTY workspace MVP — implemented and tested
 
 Build the Electron shell, room navigation, vertical grouped tabs, local PTY launch for shell and detected CLIs, split terminal view, Room Activity lifecycle, and local room metadata persistence. Include explicit manual paste with user-controlled submission.
 
@@ -16,13 +16,13 @@ Build the Electron shell, room navigation, vertical grouped tabs, local PTY laun
 
 ## 2. Structured delegation adapters — pending
 
-Explore provider adapters using the newly observed local CLI paths as candidates, and use a stable documented SDK, app-server interface, or equivalent supported protocol only where it provides useful structured operations. Define a common capability contract for status, task creation/handoff, result events, cancellation, and errors as supported. Retain manual handoff for unsupported paths and require user-visible confirmation before submission.
+Use the documented CLI structured modes and process-scoped MCP configuration described in [native integration research](native-integration.md). Define a common capability contract for status, task creation/handoff, result events, cancellation, and errors as supported. Retain manual handoff for unsupported paths. Dispatch requires user-visible confirmation by default until the user opts into a room policy; after opt-in, the authorized room tools may dispatch without per-call confirmation inside that policy.
 
 **Exit:** each adapter has capability-specific implementation evidence and lifecycle handling; unsupported features are shown as unavailable.
 
 ## 3. User-authorized agent dispatch — pending
 
-Once a provider path can reliably identify sessions and report delivery, add room-level policy that lets an agent open or message another agent without per-dispatch confirmation when the user has opted in. Keep the policy scoped to named destinations and operations, visible in the room, revocable, and reflected in Room Activity. Preserve provider permissions. This is an explicit user-controlled capability, not an orchestration LLM.
+Add room-level policy that lets an agent open or message another agent without per-dispatch confirmation when the user has opted in. Keep the policy scoped to allowed providers, destinations, operations and concurrency, visible in the room, revocable, and reflected in Room Activity. Preserve provider permissions. This is an explicit user-controlled capability, not an orchestration LLM.
 
 ## 4. Cross-provider workflows — pending
 
