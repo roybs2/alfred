@@ -58,6 +58,27 @@ const path = require('node:path');
         BrowserWindow.getAllWindows()[0].webContents.send('rooms:agent-event', value);
       }, event);
     };
+    // Registers a synthetic session directly on the real AgentEngine (via the test-only
+    // global set in desktop/main.cjs), so rooms:rename-agent-session has something real to
+    // rename without launching an actual provider process.
+    const registerRealSession = async (session) => {
+      await app.evaluate((_electron, value) => {
+        const engine = global.__ROOMS_TEST_AGENT_ENGINE__;
+        engine.sessions.set(value.id, {
+          id: value.id,
+          roomId: value.roomId,
+          provider: value.provider,
+          name: value.name,
+          status: value.status,
+          cwd: process.cwd(),
+          queue: [],
+          active: null,
+          providerSessionId: null,
+          token: null,
+        });
+      }, session);
+    };
+    await registerRealSession(child);
     await send({ type: 'session-created', sessionId: child.id, roomId, session: child });
     await page.getByText('Codex child', { exact: true }).first().waitFor();
     await page.getByText('Codex child managed session created.', { exact: true }).waitFor();
@@ -82,6 +103,7 @@ const path = require('node:path');
       name: 'Claude reviewer',
       status: 'idle',
     };
+    await registerRealSession(reviewer);
     await send({ type: 'session-created', sessionId: reviewer.id, roomId, session: reviewer });
     await page.getByText('Claude reviewer', { exact: true }).first().waitFor();
 
@@ -228,12 +250,7 @@ const path = require('node:path');
     await managedRenameInput.press('Enter');
     await page.locator('#pane-synthetic-child .pane-name', { hasText: 'Codex lead' }).waitFor();
     await page.getByRole('button', { name: 'Focus Codex lead session' }).waitFor();
-    await page
-      .getByText(
-        'Codex child renamed to Codex lead. Display name only — room_send addressing needs a rooms:rename-agent-session IPC, which does not exist yet.',
-        { exact: true },
-      )
-      .waitFor();
+    await page.getByText('Codex child renamed to Codex lead.', { exact: true }).waitFor();
 
     // Rename uniqueness: renaming another session to a name already in use
     // in this room must be BLOCKED with an inline error, editing left open,

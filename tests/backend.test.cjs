@@ -8,8 +8,9 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const vm = require('node:vm');
 
-function backendHarness() {
+function backendHarness(extraEnv = {}, { seedUserData } = {}) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-state-'));
+  if (seedUserData) seedUserData(userData);
   const handlers = new Map();
   const appHandlers = new Map();
   const terminalMocks = [];
@@ -84,7 +85,17 @@ function backendHarness() {
     require: (name) =>
       name === 'electron' ? electron : name === 'node-pty' ? fakePty : nodeRequire(name),
     __dirname: path.join(__dirname, '..', 'desktop'),
-    process: { ...process, argv: ['node', 'main.cjs'] },
+    process: {
+      ...process,
+      argv: ['node', 'main.cjs'],
+      // Point the userData migration at a directory that never exists by default, so tests never
+      // read or copy the real developer's ~/Library/Application Support/agent-rooms state.
+      env: {
+        ...process.env,
+        AGENT_ROOMS_TEST_OLD_USERDATA: path.join(os.tmpdir(), 'agent-rooms-no-old-userdata'),
+        ...extraEnv,
+      },
+    },
     Buffer,
     URL,
     console,
@@ -222,5 +233,47 @@ test('project state round-trips and rejects values above the storage bound', asy
     assert.throws(() => h.invoke('rooms:save-state', { text: 'x'.repeat(1024 * 1024) }), /1 MB/);
   } finally {
     fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
+test('renaming to Alfred migrates saved rooms from the old agent-rooms userData directory', async () => {
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-old-userdata-'));
+  const state = { project: 'preserved', rooms: [{ id: 'kept' }] };
+  fs.writeFileSync(path.join(oldDir, 'project-state.json'), JSON.stringify(state));
+  const h = backendHarness({ AGENT_ROOMS_TEST_OLD_USERDATA: oldDir });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(JSON.stringify(h.invoke('rooms:load-state')), JSON.stringify(state));
+    // The old file is left in place (copy, not move) and the new directory now owns its own copy.
+    assert.ok(fs.existsSync(path.join(oldDir, 'project-state.json')));
+    assert.ok(fs.existsSync(path.join(h.userData, 'project-state.json')));
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+    fs.rmSync(oldDir, { recursive: true, force: true });
+  }
+});
+
+test('userData migration is skipped when the new directory already has saved state', async () => {
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-old-userdata-'));
+  fs.writeFileSync(
+    path.join(oldDir, 'project-state.json'),
+    JSON.stringify({ project: 'old-should-not-win' }),
+  );
+  const newState = { project: 'already-here' };
+  const h = backendHarness(
+    { AGENT_ROOMS_TEST_OLD_USERDATA: oldDir },
+    {
+      seedUserData: (userData) => {
+        fs.mkdirSync(userData, { recursive: true });
+        fs.writeFileSync(path.join(userData, 'project-state.json'), JSON.stringify(newState));
+      },
+    },
+  );
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(JSON.stringify(h.invoke('rooms:load-state')), JSON.stringify(newState));
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+    fs.rmSync(oldDir, { recursive: true, force: true });
   }
 });

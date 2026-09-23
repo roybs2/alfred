@@ -1,8 +1,8 @@
-# Agent Rooms
+# Alfred
 
-Agent Rooms is a Mac-first desktop workspace for working with coding agents in focused project rooms. It brings vertical tabs, room grouping, and multiple local agent sessions into one calm, inspectable interface while continuing to use the CLIs developers already have installed.
+Alfred is a Mac-first desktop workspace for working with coding agents in focused project rooms. It brings vertical tabs, room grouping, and multiple local agent sessions into one calm, inspectable interface while continuing to use the CLIs developers already have installed.
 
-The project is open source in intent. Its software license is still to be chosen; no license has been assumed.
+The project is licensed under Apache-2.0. Publishing the repository (making it public, cutting a GitHub release) still requires explicit owner approval.
 
 ## Current state
 
@@ -49,4 +49,4 @@ Run the production build with `npm run build && npm start`. This is a source che
 - Keep the local CLI as the agent runtime and preserve existing user authentication.
 - Keep agent dispatch explicit, authorized, and observable; the MVP manual-paste path never auto-submits.
 - Treat delegation and provider context boundaries honestly.
-- Use no orchestration LLM. Agent Rooms is a workspace and harness, not an extra reasoning layer.
+- Use no orchestration LLM. Alfred is a workspace and harness, not an extra reasoning layer.

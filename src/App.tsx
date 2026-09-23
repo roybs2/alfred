@@ -28,6 +28,10 @@ type ManagedSession = {
     taskId?: string;
     role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation';
     text: string;
+    // Delegation entries only: the live target session id, so the line can always be
+    // rendered with current names (session.name for the source, this id for the target)
+    // instead of the names frozen into `text` when the delegation event fired.
+    targetSessionId?: string;
   }[];
 };
 type Session = TerminalSession | ManagedSession;
@@ -49,12 +53,14 @@ type AgentEvent = {
     | 'task-completed'
     | 'task-failed'
     | 'session-stopped'
+    | 'session-renamed'
     | 'delegation'
     | 'permission-denied';
   sessionId: string;
   roomId: string;
   taskId?: string;
   text?: string;
+  name?: string;
   targetSessionId?: string;
   targetTaskId?: string;
   session?: {
@@ -116,6 +122,7 @@ type Bridge = {
   }>;
   runAgentTask(input: { sessionId: string; text: string }): Promise<{ taskId: string }>;
   stopAgentSession(id: string): Promise<void>;
+  renameAgentSession(input: { id: string; name: string }): Promise<{ id: string; name: string }>;
   setRoomPolicy(input: {
     roomId: string;
     allowSpawn: boolean;
@@ -188,6 +195,7 @@ const appendTranscript = (
   role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation',
   text: string,
   taskId?: string,
+  targetSessionId?: string,
 ): ManagedSession => {
   const previous = session.transcript.at(-1);
   if (role === 'agent' && previous?.role === 'agent' && previous.taskId === taskId) {
@@ -201,7 +209,10 @@ const appendTranscript = (
   }
   return {
     ...session,
-    transcript: [...session.transcript, { id: makeId(), taskId, role, text }].slice(-200),
+    transcript: [
+      ...session.transcript,
+      { id: makeId(), taskId, role, text, targetSessionId },
+    ].slice(-200),
   };
 };
 
@@ -354,6 +365,7 @@ function ManagedPane({
   onCommitRename,
   onCancelRename,
   onBlurRename,
+  resolveSessionName,
 }: {
   session: ManagedSession;
   onClose: () => void;
@@ -366,6 +378,9 @@ function ManagedPane({
   onCommitRename: () => void;
   onCancelRename: () => void;
   onBlurRename: () => void;
+  // Live current-name lookup by session id, so a delegation line always reads
+  // with names as they are now, not as they were when the delegation fired.
+  resolveSessionName: (id: string) => string;
 }) {
   const [task, setTask] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -451,7 +466,11 @@ function ManagedPane({
                           ? 'DELEGATION'
                           : 'STATUS'}
               </span>
-              <p>{entry.text}</p>
+              <p>
+                {entry.role === 'delegation' && entry.targetSessionId
+                  ? session.name + ' → ' + resolveSessionName(entry.targetSessionId)
+                  : entry.text}
+              </p>
             </div>
           ))
         ) : (
@@ -693,6 +712,8 @@ export default function App() {
                 ...room,
                 sessions: room.sessions.map((session) => {
                   if (session.id !== event.sessionId || session.kind !== 'managed') return session;
+                  if (event.type === 'session-renamed' && event.name)
+                    return { ...session, name: event.name };
                   if (event.type === 'task-started')
                     return event.text
                       ? appendTranscript(
@@ -714,7 +735,13 @@ export default function App() {
                     );
                   if (event.type === 'session-stopped') return { ...session, status: 'stopped' };
                   if (event.type === 'delegation' && event.text)
-                    return appendTranscript(session, 'delegation', event.text, event.taskId);
+                    return appendTranscript(
+                      session,
+                      'delegation',
+                      event.text,
+                      event.taskId,
+                      event.targetSessionId,
+                    );
                   if (event.type === 'permission-denied')
                     return appendTranscript(
                       session,
@@ -1001,12 +1028,12 @@ export default function App() {
   // stay unique within the room — case-insensitively, since room_send
   // addressing a managed session by name should not depend on case — and a
   // rejected rename keeps editing open with an inline error rather than
-  // silently accepting a collision. This is UI/display state only — there
-  // is no backend IPC yet to rename the underlying agent-engine session, so
-  // a managed session's actual room_send address does not change until one
-  // exists (rooms:rename-agent-session).
+  // silently accepting a collision. For a managed session, the rename is
+  // sent to the backend (rooms:rename-agent-session) first, and local state
+  // is only updated on success — otherwise the name shown to the user and
+  // the actual room_send address would drift apart.
   const commitRename = useCallback(
-    (session: Session): boolean => {
+    async (session: Session): Promise<boolean> => {
       const room = roomsRef.current.find((r) => r.sessions.some((s) => s.id === session.id));
       if (!room) {
         setRenamingSessionId('');
@@ -1042,6 +1069,14 @@ export default function App() {
         return false;
       }
       const previousName = target.name;
+      if (target.kind === 'managed' && bridge) {
+        try {
+          await bridge.renameAgentSession({ id: target.id, name: trimmed });
+        } catch (error) {
+          setRenameError('Could not rename: ' + String((error as Error)?.message || error));
+          return false;
+        }
+      }
       setRooms((prev) =>
         prev.map((r) =>
           r.id !== room.id
@@ -1052,21 +1087,12 @@ export default function App() {
               },
         ),
       );
-      appendActivity(
-        previousName +
-          ' renamed to ' +
-          trimmed +
-          (target.kind === 'managed'
-            ? '. Display name only — room_send addressing needs a rooms:rename-agent-session IPC, which does not exist yet.'
-            : '.'),
-        'user',
-        room.id,
-      );
+      appendActivity(previousName + ' renamed to ' + trimmed + '.', 'user', room.id);
       setRenamingSessionId('');
       setRenameError('');
       return true;
     },
-    [sessionNameDraft, appendActivity],
+    [sessionNameDraft, appendActivity, bridge],
   );
   useEffect(() => {
     if (!menu) {
@@ -1206,7 +1232,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-glyph">◈</span>
-          <span>ROOMS</span>
+          <span>ALFRED</span>
           <span className="brand-beta">DESKTOP</span>
         </div>
         <div className="workspace-label">WORKSPACE</div>
@@ -1592,6 +1618,9 @@ export default function App() {
                               onCommitRename={() => commitRename(session)}
                               onCancelRename={cancelRename}
                               onBlurRename={blurCancelRename}
+                              resolveSessionName={(id) =>
+                                room.sessions.find((s) => s.id === id)?.name || id
+                              }
                             />
                           )}
                         </div>
@@ -1752,7 +1781,7 @@ export default function App() {
                     {current.allowSpawn ? ' and room_spawn' : ''} tools without a provider
                     permission prompt. All other tools keep your provider permissions, and your
                     deny rules still apply. Does not apply to Cursor sessions: Cursor only honors
-                    allow rules from its own config files, which Agent Rooms does not write.
+                    allow rules from its own config files, which Alfred does not write.
                   </div>
                   <label className="policy-limit">
                     Session limit

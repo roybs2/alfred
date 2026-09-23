@@ -10,11 +10,11 @@ Start with a desktop app that can host local terminal sessions and room organiza
 
 ### Local CLIs remain the agent runtime
 
-Use the user's installed command line tools and their established authentication. Keep Agent Rooms' first role to launching, organizing, and observing sessions.
+Use the user's installed command line tools and their established authentication. Keep Alfred's first role to launching, organizing, and observing sessions.
 
 ### Minimal harness; no orchestration LLM
 
-Agent Rooms does not add an LLM to decide which provider runs, translate every prompt, or reconstruct hidden context. Any future workflow must be user-directed or use a provider-supported protocol.
+Alfred does not add an LLM to decide which provider runs, translate every prompt, or reconstruct hidden context. Any future workflow must be user-directed or use a provider-supported protocol.
 
 ### MVP handoff is explicit; room authorization can reduce future friction
 
@@ -43,13 +43,16 @@ Decided 2026-09-22 after reading Cursor CLI 2026.09.18-9a7762b help and docs and
 - **Prompt input.** No stdin prompt input is documented, so the prompt is one argv element after `--` (no shell). It is visible to local process listings for the life of the turn.
 - **Bridge check.** Cursor's `system/init` reports no MCP status, so unlike Claude and Codex a failed bridge cannot be detected before the model turn.
 
-### License remains open
+### Product name and license (owner decision, 2026-09-22)
 
-The project is intended to be open source, but the owner has not selected a license. Do not invent one or add a license file without that decision.
+The owner named the product **Alfred** and set its license to **Apache-2.0** (LICENSE already present in the repo). This supersedes the earlier constraint in AGENTS.md against choosing a name or claiming a license. User-visible branding (window title, sidebar logo, HTML title, `package.json` name/productName/description/license, activity/policy copy, the MCP server name reported by `room-mcp-bridge.mjs`, and docs) was updated to Alfred. "Rooms" remains the in-product concept — Alfred has rooms.
+
+Kept unchanged, deliberately: IPC channel names (`rooms:*`), env var names (`AGENT_ROOMS_*`, including the `x-agent-rooms-token` bridge header), the MCP tool names `room_send`/`room_spawn`, and the Cursor plugin folder/server name `agent-rooms` (so the tool id `plugin-agent-rooms-agent_rooms-room_send` recorded in adapters.md is still accurate and did not need updating). Only the MCP server's own reported `name` field in `room-mcp-bridge.mjs` (as seen via `initialize`/tools metadata, not the Cursor plugin id) changed to `alfred`.
+
+Electron derives the default userData directory from the app name; adding `productName: "Alfred"` moves that directory. `desktop/main.cjs` now migrates `project-state.json` from the previous `agent-rooms` userData directory into the new one on first launch when the new directory has no saved state yet, so existing rooms are not lost. Covered by backend tests in `tests/backend.test.cjs`.
 
 ## Open questions
 
 - Which officially documented Claude Code and Codex interfaces, if any, provide stable structured session or delegation control?
 - What exact room and session metadata should survive restart?
 - Which macOS versions and distribution channel will be supported first?
-- Which open-source license does the owner want?

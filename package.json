@@ -1,8 +1,10 @@
 {
-  "name": "agent-rooms",
+  "name": "alfred",
+  "productName": "Alfred",
   "version": "0.1.0",
   "private": true,
-  "description": "Local agent workspaces with visible rooms and terminals",
+  "description": "Alfred: local agent workspaces with visible rooms and terminals",
+  "license": "Apache-2.0",
   "main": "desktop/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",

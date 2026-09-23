@@ -66,6 +66,24 @@ class AgentEngine {
     return session;
   }
 
+  // Renaming changes the live address agents use to reach this session (resolveDestination reads
+  // session.name from the same session object), so this is the single source of truth for names —
+  // never a display-only rename in the UI.
+  renameSession(id, name) {
+    const session = this.sessions.get(nonempty(id, 'session id', 80));
+    if (!session) throw new Error('Unknown managed agent session');
+    nonempty(name, 'agent name', 80);
+    const trimmed = name.trim();
+    if (!trimmed.length) throw new TypeError('Invalid agent name');
+    const collision = [...this.sessions.values()].some(
+      (s) => s.id !== id && s.roomId === session.roomId && s.name.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (collision) throw new Error('Another agent in this room already uses that name');
+    session.name = trimmed;
+    this.emit({ type: 'session-renamed', sessionId: id, roomId: session.roomId, name: trimmed });
+    return { id, name: trimmed };
+  }
+
   getRoomSessions(roomId) {
     return [...this.sessions.values()].filter((s) => s.roomId === roomId).map(({ id, name, provider, status }) => ({ id, name, provider, status }));
   }

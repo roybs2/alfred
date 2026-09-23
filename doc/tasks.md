@@ -4,7 +4,8 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 
 ## Done — foundation
 
-- [x] New standalone Git project in `/Users/roy/repos/agent-rooms`; temporary name.
+- [x] New standalone Git project in `/Users/roy/repos/agent-rooms`.
+- [x] Name and license decided by the owner (2026-09-22): product is **Alfred**, license **Apache-2.0**. See decisions.md.
 - [x] Electron + React + TypeScript + xterm.js + node-pty with lockfile.
 - [x] Isolated renderer, narrow preload API, main-frame IPC validation, CSP, provider allowlist.
 - [x] Create, rename, switch and remove rooms; select a project directory.
@@ -56,13 +57,14 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 ## Remaining UX/release work
 
 - [ ] Resizable split handles and pane layout controls.
-- [ ] Distinct names/roles for multiple sessions of the same provider.
+- [x] Distinct names/roles for multiple sessions of the same provider: renaming a managed session now calls `rooms:rename-agent-session`, which renames the real `AgentEngine` session (so `room_send` addresses the new name immediately) and only updates the UI on backend success; unit tests cover validation, per-room case-insensitive uniqueness, and `resolveDestination` after a rename.
+- [x] Delegation transcript lines in a managed session's own pane are rendered from the live session name (source) and the target session id (current name), like Room Activity already did, instead of the names frozen into the event text.
 - [ ] Better recovery and persisted activity/session display history (no sensitive transcripts by default).
 - [ ] Provider discovery beyond the Claude/Codex/Cursor/shell allowlist. Cursor backend support is done; its UI picker entry is pending.
 - [ ] More accessibility and keyboard navigation checks.
 - [ ] Define supported macOS versions and Intel/Apple Silicon release coverage.
 - [ ] Signed/notarized installer, updates and clean-machine installation checks.
-- [ ] Select final name and license with owner; no public repository or release has been published.
+- [x] Name is Alfred; license Apache-2.0 (owner decision, 2026-09-22). No public repository or release has been published; publishing still needs explicit owner approval.
 
 ## Post-MVP (owner requests, 2026-09-22)
 

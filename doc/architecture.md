@@ -2,7 +2,7 @@
 
 ## Shape of the application
 
-Agent Rooms is a Mac-first Electron desktop application. Keep the process boundary clear: the renderer owns room navigation, vertical tabs, splits, and activity presentation; the privileged main process owns local persistence and process lifecycle; a narrow preload bridge exposes validated operations to the renderer. Do not expose unrestricted Node APIs to UI code. The current scaffold has Electron main/preload entry points and a React renderer; the concrete IPC contract and end-to-end behavior are still in progress.
+Alfred is a Mac-first Electron desktop application. Keep the process boundary clear: the renderer owns room navigation, vertical tabs, splits, and activity presentation; the privileged main process owns local persistence and process lifecycle; a narrow preload bridge exposes validated operations to the renderer. Do not expose unrestricted Node APIs to UI code. The current scaffold has Electron main/preload entry points and a React renderer; the concrete IPC contract and end-to-end behavior are still in progress.
 
 The current MVP uses local PTY processes as its execution layer. A session is a child process started in a room working directory, with terminal input/output and lifecycle events passed through the desktop IPC boundary. Shell, Claude Code, and Codex are launched as local commands. CLI discovery should be explicit and failure-tolerant: an unavailable CLI must not prevent shell use. Native permission-bypass flags must never be added implicitly.
 

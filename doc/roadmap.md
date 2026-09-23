@@ -4,7 +4,7 @@ Statuses reflect visible code and evidence at the time of the latest update. Mil
 
 ## 0. Capability validation — in progress
 
-Read-only inspection of installed Codex CLI 0.149.1 and Claude Code 2.1.280 help shows promising local controls: Codex can queue a message for a session by UUID or exact name and can browse sessions on a shared app-server; Claude Code can run/list/attach/log/stop background sessions. This confirms useful CLI entry points exist, but not that Agent Rooms can reliably discover identity, receive notifications, or perform native cross-provider delegation. Next, verify official documentation and the interaction semantics. Keep research read-only; do not submit billable agent tasks.
+Read-only inspection of installed Codex CLI 0.149.1 and Claude Code 2.1.280 help shows promising local controls: Codex can queue a message for a session by UUID or exact name and can browse sessions on a shared app-server; Claude Code can run/list/attach/log/stop background sessions. This confirms useful CLI entry points exist, but not that Alfred can reliably discover identity, receive notifications, or perform native cross-provider delegation. Next, verify official documentation and the interaction semantics. Keep research read-only; do not submit billable agent tasks.
 
 **Exit:** documented capability matrix with links to provider documentation, verified identity and notification behavior, and clear distinctions between local session control, provider-native delegation, and cross-provider handoff; no unsupported capability claim.
 
@@ -32,6 +32,6 @@ Design user-directed handoffs between provider runtimes. Preserve provenance, sh
 
 ## 5. Polish and distribution — pending
 
-Improve onboarding, accessibility, recovery behavior, macOS packaging, signing/notarization planning, update strategy, and documentation. Choose a software license with the project owner before publishing a license file or distributing under an assumed license.
+Improve onboarding, accessibility, recovery behavior, macOS packaging, signing/notarization planning, update strategy, and documentation. Name (Alfred) and license (Apache-2.0) were decided by the owner on 2026-09-22 (see decisions.md); publishing the repository or a release still requires explicit owner approval.
 
-**Exit:** clean install and upgrade paths are understood; platform checks and distribution limitations are documented; license decision is recorded.
+**Exit:** clean install and upgrade paths are understood; platform checks and distribution limitations are documented.

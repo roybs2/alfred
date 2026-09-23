@@ -1,6 +1,6 @@
-# Agent Rooms
+# Alfred
 
-Temporary project name. All implementation and planning lives in this repository.
+Name is Alfred; license Apache-2.0 (owner decision, 2026-09-22). All implementation and planning lives in this repository.
 
 ## Product constraints
 - Mac-first Electron application; vertical sessions grouped into rooms.
@@ -16,4 +16,4 @@ Temporary project name. All implementation and planning lives in this repository
 - Record architecture decisions in doc/decisions.md and integration evidence in doc/adapters.md.
 - Run npm test and npm run build for meaningful changes. npm run test:smoke uses a real local shell; it must not launch billable agent work.
 - Keep lockfile committed. Native node-pty must be rebuilt for the installed Electron version.
-- Do not publish, choose a final product name, or claim a license until the owner has decided.
+- Name is Alfred; license Apache-2.0. Publishing (making the repo public, GitHub releases) only when the owner has approved it.

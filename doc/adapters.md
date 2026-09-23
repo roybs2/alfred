@@ -2,7 +2,7 @@
 
 ## Why this boundary matters
 
-Starting a provider's CLI in a PTY is not the same as integrating its agent protocol. It gives Agent Rooms a local terminal session, but does not by itself expose structured task creation, internal state, tool events, cancellation, or delegation. The UI and documentation must keep those capabilities separate.
+Starting a provider's CLI in a PTY is not the same as integrating its agent protocol. It gives Alfred a local terminal session, but does not by itself expose structured task creation, internal state, tool events, cancellation, or delegation. The UI and documentation must keep those capabilities separate.
 
 ## MVP adapter: local process
 
@@ -38,7 +38,7 @@ These observations are specific to the installed versions and may change. The CL
 - [Codex App Server](https://developers.openai.com/codex/app-server) is an official integration surface to assess alongside the installed CLI's `app-server` and `queue` commands. Verify its current protocol, supported operations, authentication, and notification behavior before adopting it.
 - [Claude Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) describes embedding the Claude Code agent loop in an application process, while the CLI is the interactive terminal path. Its docs say SDK quickstart uses an API key and third-party products may not offer claude.ai login or rate limits absent approval. Validate this constraint before choosing the SDK path.
 
-SDK/app-server integrations differ from launching an already installed local CLI. Launching the local CLI uses that tool's own sign-in and permission flow; it does not by itself grant Agent Rooms structured API control. Avoid silently switching users from their CLI authentication to API billing.
+SDK/app-server integrations differ from launching an already installed local CLI. Launching the local CLI uses that tool's own sign-in and permission flow; it does not by itself grant Alfred structured API control. Avoid silently switching users from their CLI authentication to API billing.
 
 ## Provider research notes
 
@@ -109,7 +109,7 @@ The owner authorized adding Cursor CLI and a small live test budget of at most 4
 - **Single turn (turn 1).** `-p --output-format stream-json --stream-partial-output --plugin-dir <tmp>/agent-rooms -- <prompt>`.
   - Events: `system/init` (keys `apiKeySource, cwd, session_id, model, permissionMode`; `permissionMode: "default"`; no MCP status field), `user`, `thinking` `delta`/`completed` (ignored), an `assistant` delta, the final full `assistant` message (no `timestamp_ms`), `result/success` (`duration_ms` 3034, `usage`).
   - The task completed with `OK` in about 10.5 s wall time, with session id `1d2e7ebc-…`.
-- **Bridge loaded through `--plugin-dir`.** At `system/init`, `ps` showed `node …/desktop/room-mcp-bridge.mjs` as a child of `cursor-agent`. The tool was exposed as `plugin-<plugin dir basename>-<server key>-room_send`. After the change to a fixed basename, the id became `plugin-agent-rooms-agent_rooms-room_send` (server `plugin-agent-rooms-agent_rooms`). Loading the plugin may depend on a Cursor-side feature gate (`enableUserLocalPlugins`) and has not been verified on other accounts or versions. Nothing was written to the project or to `~/.cursor`, and the temporary plugin directories were gone after each run.
+- **Bridge loaded through `--plugin-dir`.** At `system/init`, `ps` showed `node …/desktop/room-mcp-bridge.mjs` as a child of `cursor-agent`. The tool was exposed as `plugin-<plugin dir basename>-<server key>-room_send`. After the change to a fixed basename, the id became `plugin-agent-rooms-agent_rooms-room_send` (server `plugin-agent-rooms-agent_rooms`). Loading the plugin may depend on a Cursor-side feature gate (`enableUserLocalPlugins`) and has not been verified on other accounts or versions. Nothing was written to the project or to `~/.cursor`, and the temporary plugin directories were gone after each run. This evidence was captured while the Cursor plugin folder/server name was still `agent-rooms`; the 2026-09-22 rename to Alfred deliberately kept that plugin name unchanged (see decisions.md), so the tool id above is still accurate. It is unrelated to `room-mcp-bridge.mjs`'s own `McpServer` name, which is now `alfred`.
 - **Resume (turn 2).** The same argv plus `--resume 1d2e7ebc-…` kept the same `session_id` in init and result.
   - In this resumed chat, the model called the tool under the first turn's randomly named plugin id. That led to the fixed plugin naming.
   - The result text concatenates all assistant segments, including the pre-tool preamble (`"…DONE.DONE"`). The runner passes it through unchanged.

@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld(
     createAgentSession: (options) => ipcRenderer.invoke('rooms:create-agent-session', options),
     runAgentTask: (options) => ipcRenderer.invoke('rooms:run-agent-task', options),
     stopAgentSession: (id) => ipcRenderer.invoke('rooms:stop-agent-session', id),
+    renameAgentSession: (options) => ipcRenderer.invoke('rooms:rename-agent-session', options),
     setRoomPolicy: (options) => ipcRenderer.invoke('rooms:set-room-policy', options),
     onAgentEvent: (callback) => subscribe('rooms:agent-event', callback),
     onOutput: (callback) => subscribe('rooms:output', callback),

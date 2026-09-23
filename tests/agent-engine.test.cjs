@@ -581,3 +581,54 @@ test('room bridge registers only the tools the runner enables', async () => {
   assert.deepEqual(await listFor('room_send,room_spawn'), ['room_send', 'room_spawn']);
   assert.deepEqual(await listFor(undefined), ['room_send', 'room_spawn']);
 });
+
+test('renameSession validates input, enforces per-room case-insensitive uniqueness, and emits session-renamed', async () => {
+  const { engine, events, create } = setup();
+  const a = create('r', 'Writer');
+  const b = create('r', 'Reviewer');
+  const other = create('other-room', 'Writer');
+
+  assert.throws(() => engine.renameSession(a.id, ''), /Invalid agent name/);
+  assert.throws(() => engine.renameSession(a.id, 'x'.repeat(81)), /Invalid agent name/);
+  assert.throws(() => engine.renameSession(a.id, 'bad\0name'), /Invalid agent name/);
+  assert.throws(() => engine.renameSession('missing-id', 'New Name'), /Unknown managed agent session/);
+
+  // Same room, case-insensitive collision is rejected.
+  assert.throws(() => engine.renameSession(a.id, 'reviewer'), /already uses that name/);
+  // A same-named session in a different room is not a collision.
+  assert.doesNotThrow(() => engine.renameSession(a.id, 'Writer'));
+
+  const result = engine.renameSession(a.id, 'Lead Writer');
+  assert.deepEqual(result, { id: a.id, name: 'Lead Writer' });
+  assert.equal(engine.sessions.get(a.id).name, 'Lead Writer');
+  assert.equal(engine.sessions.get(other.id).name, 'Writer');
+  const event = events.findLast((e) => e.type === 'session-renamed');
+  assert.deepEqual(event, { type: 'session-renamed', sessionId: a.id, roomId: 'r', name: 'Lead Writer' });
+
+  // Trims surrounding whitespace.
+  engine.renameSession(b.id, '  Senior Reviewer  ');
+  assert.equal(engine.sessions.get(b.id).name, 'Senior Reviewer');
+});
+
+test('room_send resolves a managed session by its current name after a rename, not the name captured at task start', async () => {
+  const { engine, calls, create } = setup();
+  const a = create('r', 'Source');
+  const target = create('r', 'OldName');
+  engine.runTask({ sessionId: a.id, text: 'Lead' });
+  await tick();
+  const source = engine.sessions.get(a.id);
+
+  engine.renameSession(target.id, 'NewName');
+
+  const call = engine.toolCall(source, 'room_send', { to: 'NewName', task: 'do it' });
+  await tick();
+  assert.equal(calls.length, 2);
+  calls[1].resolve({ text: 'done', providerSessionId: 'p2' });
+  await call;
+
+  await assert.rejects(
+    engine.toolCall(source, 'room_send', { to: 'OldName', task: 'x' }),
+    /Unknown destination/,
+  );
+  engine.stopAll();
+});

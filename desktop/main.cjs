@@ -24,10 +24,47 @@ const agentEngine = new AgentEngine({
 });
 agentEngine.setBridge(new BridgeBroker(agentEngine));
 const isDev = process.argv.includes('--dev');
+// Test-only hook so smoke tests can register synthetic managed sessions directly on the real
+// engine (e.g. to exercise rooms:rename-agent-session) without launching a real provider process.
+if (process.env.AGENT_ROOMS_TEST_MODE === '1') global.__ROOMS_TEST_AGENT_ENGINE__ = agentEngine;
 if (process.env.AGENT_ROOMS_TEST_MODE === '1' && process.env.AGENT_ROOMS_TEST_DATA) {
   if (!path.isAbsolute(process.env.AGENT_ROOMS_TEST_DATA))
     throw new Error('AGENT_ROOMS_TEST_DATA must be an absolute path');
   app.setPath('userData', process.env.AGENT_ROOMS_TEST_DATA);
+} else {
+  migrateUserDataFromOldAppName();
+}
+
+// The app was previously named "agent-rooms" (package.json "name"), which Electron used to
+// derive the default userData directory. Renaming to "Alfred" (via "productName") moves that
+// directory, which would otherwise orphan any saved rooms/session state. If the new directory
+// has no saved state yet and the old one does, copy project-state.json across so nothing is lost.
+function oldUserDataDir() {
+  // Test-only override so the migration path can be exercised without touching the real
+  // per-user config directory.
+  if (process.env.AGENT_ROOMS_TEST_OLD_USERDATA) return process.env.AGENT_ROOMS_TEST_OLD_USERDATA;
+  const home = os.homedir();
+  if (process.platform === 'darwin')
+    return path.join(home, 'Library', 'Application Support', 'agent-rooms');
+  if (process.platform === 'win32')
+    return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'agent-rooms');
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'agent-rooms');
+}
+
+function migrateUserDataFromOldAppName() {
+  try {
+    const newDir = app.getPath('userData');
+    const newFile = path.join(newDir, 'project-state.json');
+    if (fs.existsSync(newFile)) return;
+    const oldDir = oldUserDataDir();
+    if (path.resolve(oldDir) === path.resolve(newDir)) return;
+    const oldFile = path.join(oldDir, 'project-state.json');
+    if (!fs.existsSync(oldFile)) return;
+    fs.mkdirSync(newDir, { recursive: true });
+    fs.copyFileSync(oldFile, newFile);
+  } catch {
+    // Best-effort migration only; a failure here should never block app startup.
+  }
 }
 
 function findExecutable(names, extraPaths = []) {
@@ -215,6 +252,7 @@ handle('rooms:create-agent-session', ({ roomId, provider, cwd, name } = {}) => {
 });
 handle('rooms:run-agent-task', (options) => agentEngine.runTask(options || {}));
 handle('rooms:stop-agent-session', (id) => agentEngine.stopSession(id));
+handle('rooms:rename-agent-session', ({ id, name } = {}) => agentEngine.renameSession(id, name));
 handle('rooms:set-room-policy', (options) => agentEngine.setRoomPolicy(options || {}));
 handle('rooms:load-state', () => {
   const file = path.join(app.getPath('userData'), 'project-state.json');

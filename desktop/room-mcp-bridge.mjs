@@ -12,7 +12,7 @@ try { peers = JSON.parse(process.env.AGENT_ROOMS_PEERS || '[]'); } catch {}
 const directory = peers.map(({ name, id, provider }) => `${name} [${provider}, ${id}]`).join('; ') || 'none';
 // Tools this process may expose (set by the runner from room policy); default keeps both for older callers.
 const enabled = new Set((process.env.AGENT_ROOMS_TOOLS || 'room_send,room_spawn').split(','));
-const server = new McpServer({ name: 'agent-rooms', version: '0.1.0' });
+const server = new McpServer({ name: 'alfred', version: '0.1.0' });
 
 // node:http instead of fetch: delegated tasks can run far longer than undici's 300s headers timeout.
 function post(payload) {
