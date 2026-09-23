@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -20,6 +20,35 @@ const MAX_HISTORY_NAME = 200;
 const MAX_PROVIDER_SESSION_ID = 400;
 const SESSION_FINAL_STATES = ['exited', 'stopped', 'failed', 'completed'];
 const ACTIVITY_KINDS = ['system', 'user', 'warning'];
+// Keyboard-shortcut settings (a top-level, non-per-room field: settings.shortcuts) — the exact
+// action ids the renderer knows about (see SHORTCUT_ACTION_IDS in src/App.tsx). Bindings only,
+// never anything else about "settings".
+const SHORTCUT_ACTION_IDS = [
+  'newRoom',
+  'addSession',
+  'closeSession',
+  'nextSession',
+  'prevSession',
+  'focusSession1',
+  'focusSession2',
+  'focusSession3',
+  'focusSession4',
+  'focusSession5',
+  'focusSession6',
+  'focusSession7',
+  'focusSession8',
+  'focusSession9',
+  'nextRoom',
+  'prevRoom',
+  'toggleFocusMode',
+  'toggleActivityPanel',
+  'openSettings',
+  'focusTaskInput',
+];
+const MAX_COMBO_LENGTH = 40;
+// e.g. "meta+shift+BracketRight" — zero or more of ctrl/alt/meta/shift, then one alphanumeric
+// token (a KeyboardEvent.code fragment). Never anything else (no HTML, no arbitrary text).
+const SHORTCUT_COMBO_PATTERN = /^(?:(?:ctrl|alt|meta|shift)\+)*[A-Za-z][A-Za-z0-9]*$/;
 const sessions = new Map();
 let mainWindow;
 let pty;
@@ -247,6 +276,29 @@ function sanitizeRoomHistory(room) {
   return out;
 }
 
+// A global app setting (not per-room): only known shortcut action ids, and only combo strings
+// shaped like SHORTCUT_COMBO_PATTERN — everything else (unknown keys, non-string values,
+// oversized strings) is dropped rather than persisted, regardless of what the renderer sends.
+function sanitizeShortcuts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const id of SHORTCUT_ACTION_IDS) {
+    const combo = value[id];
+    if (
+      typeof combo === 'string' &&
+      combo.length > 0 &&
+      combo.length <= MAX_COMBO_LENGTH &&
+      SHORTCUT_COMBO_PATTERN.test(combo)
+    )
+      out[id] = combo;
+  }
+  return out;
+}
+function sanitizeSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return { shortcuts: sanitizeShortcuts(value.shortcuts) };
+}
+
 handle('rooms:detect-agents', () => detectAgents());
 handle('rooms:choose-directory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -331,9 +383,9 @@ handle('rooms:load-state', () => {
 handle('rooms:save-state', (state) => {
   if (!state || typeof state !== 'object' || Array.isArray(state))
     throw new TypeError('State must be an object');
-  const sanitized = Array.isArray(state.rooms)
-    ? { ...state, rooms: state.rooms.map(sanitizeRoomHistory) }
-    : state;
+  let sanitized = state;
+  if (Array.isArray(state.rooms)) sanitized = { ...sanitized, rooms: state.rooms.map(sanitizeRoomHistory) };
+  if ('settings' in state) sanitized = { ...sanitized, settings: sanitizeSettings(state.settings) };
   const serialized = JSON.stringify(sanitized);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_STATE_BYTES)
     throw new RangeError('Project state exceeds 1 MB');
@@ -344,6 +396,57 @@ handle('rooms:save-state', (state) => {
   fs.writeFileSync(temporary, serialized, { mode: 0o600 });
   fs.renameSync(temporary, file);
 });
+
+// A custom, minimal application menu — kept only for what the OS/native menu must always own
+// (Quit, Hide, Minimize, Undo/Redo, Cut/Copy/Paste, Select All: the "never hijack" combos in
+// doc/tasks.md). Deliberately has no Close/"Cmd+W" item: closing the focused session is a
+// renderer keyboard shortcut (see src/App.tsx), and Electron's own default menu (used whenever
+// no application menu is set) *does* bind Cmd+W to closing the window, which would silently
+// double-handle — and conflict with — that shortcut. Building this template instead of calling
+// Menu.setApplicationMenu(null) also keeps standard editing shortcuts working in text fields.
+function buildApplicationMenuTemplate() {
+  const isMac = process.platform === 'darwin';
+  return [
+    ...(isMac
+      ? [
+          {
+            label: app.name || 'Alfred',
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        // No "Close"/Cmd+W item here on purpose — see comment above.
+      ],
+    },
+  ];
+}
+if (Menu && typeof Menu.buildFromTemplate === 'function')
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildApplicationMenuTemplate()));
 
 function createWindow() {
   mainWindow = new BrowserWindow({

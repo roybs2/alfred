@@ -160,6 +160,12 @@ const assert = require('node:assert/strict');
       env: { ...process.env, AGENT_ROOMS_TEST_MODE: '1', AGENT_ROOMS_TEST_DATA: data },
     });
     const restored = await app.firstWindow();
+    await restored.evaluate(() => {
+      window.__smokeOutput = '';
+      window.rooms.onOutput((e) => {
+        window.__smokeOutput += e.data;
+      });
+    });
     await restored.getByRole('button', { name: 'Open room tmp', exact: true }).waitFor();
     assert.equal(
       await restored.locator('.terminal-card').count(),
@@ -183,10 +189,102 @@ const assert = require('node:assert/strict');
     await restored.getByRole('button', { name: /Clear history/ }).click();
     await restored.locator('.session-history').waitFor({ state: 'detached' });
 
+    // --- Keyboard shortcuts: real shell, real xterm focus. A second terminal in this room so
+    // there is something to switch between. ---
+    await restored.getByRole('button', { name: /Add session/ }).click();
+    await restored
+      .locator('.picker-menu')
+      .getByRole('button', { name: /Terminal/ })
+      .click();
+    await restored.waitForFunction(
+      () => document.querySelectorAll('.pane-anchor:not(.pane-hidden) .terminal-card').length === 2,
+    );
+
+    // Plain keys and Ctrl-C must always reach the shell when a terminal has DOM focus, never an
+    // app shortcut — even though closeSession's default binding is Meta+W, a lone "w" keystroke
+    // (no Meta) must type, and Ctrl+C must interrupt the shell, not the app.
+    const lastTerminal = restored.locator('.pane-anchor:not(.pane-hidden) .xterm-helper-textarea').last();
+    await lastTerminal.focus();
+    await restored.evaluate(() => {
+      window.__smokeOutput = '';
+    });
+    await restored.keyboard.type("printf 'PLAINKEY_%s_OK\\n' woRkS");
+    await restored.keyboard.press('Enter');
+    await restored.waitForFunction(() => window.__smokeOutput.includes('PLAINKEY_woRkS_OK'));
+    // A partial, unsubmitted line interrupted by Ctrl+C must never reach any app shortcut (it
+    // must interrupt the shell instead) — proven by the shell accepting a normal command right
+    // after it, on a fresh prompt.
+    await restored.keyboard.type('this-is-not-a-real-command-left-unsubmitted');
+    await restored.keyboard.press('Control+c');
+    await restored.keyboard.type("printf 'CTRLC_%s_OK\\n' REACHED");
+    await restored.keyboard.press('Enter');
+    await restored.waitForFunction(() => window.__smokeOutput.includes('CTRLC_REACHED_OK'));
+    // Meta-combo shortcuts still work while a terminal has focus (Next session).
+    const focusedBefore = await restored.evaluate(
+      () => document.querySelector('.session-row.focused')?.textContent,
+    );
+    await restored.keyboard.press('Meta+Shift+BracketRight');
+    await restored.waitForFunction(
+      (before) => document.querySelector('.session-row.focused')?.textContent !== before,
+      focusedBefore,
+    );
+
+    // Settings view: opened by the gear button, focus-trapped, labelled dialog, Esc closes.
+    await restored.getByRole('button', { name: 'Open settings' }).click();
+    const settingsDialog = restored.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    await settingsDialog.waitFor();
+    assert.equal(await settingsDialog.getAttribute('aria-modal'), 'true');
+
+    // Rebind "New room" to Meta+Shift+R.
+    const newRoomRow = restored.locator('.shortcut-row', { hasText: 'New room' });
+    await newRoomRow.getByRole('button', { name: /Change binding/ }).click();
+    await restored.keyboard.press('Meta+Shift+R');
+    await newRoomRow.locator('.shortcut-combo', { hasText: '⇧⌘R' }).waitFor();
+
+    // Conflict refusal: binding "Add session" to the same combo is refused inline, and does not
+    // silently steal the binding from New room.
+    const addSessionRow = restored.locator('.shortcut-row', { hasText: 'Add session' });
+    await addSessionRow.getByRole('button', { name: /Change binding/ }).click();
+    await restored.keyboard.press('Meta+Shift+R');
+    await restored.getByRole('alert').getByText(/Already used by/).waitFor();
+    await restored.getByRole('button', { name: 'Cancel' }).click();
+    await newRoomRow.locator('.shortcut-combo', { hasText: '⇧⌘R' }).waitFor();
+
+    // Esc closes the settings modal.
+    await restored.keyboard.press('Escape');
+    await settingsDialog.waitFor({ state: 'detached' });
+
+    // The rebound combo now creates a room; the old default (Meta+N) no longer does.
+    await app.evaluate(({ dialog }) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: ['/tmp'] });
+    });
+    const roomsBefore = await restored.locator('.room-row').count();
+    await restored.keyboard.press('Meta+n');
+    await restored.waitForTimeout(200);
+    assert.equal(
+      await restored.locator('.room-row').count(),
+      roomsBefore,
+      'Meta+N must no longer create a room once New room has been rebound',
+    );
+    await restored.keyboard.press('Meta+Shift+R');
+    await restored.waitForFunction(
+      (before) => document.querySelectorAll('.room-row').length === before + 1,
+      roomsBefore,
+    );
+
+    // Persistence: the rebinding is saved (settings.shortcuts, a top-level app setting).
+    const persistedShortcut = await restored.evaluate(async () => {
+      const state = await window.rooms.loadState();
+      return state.settings?.shortcuts?.newRoom;
+    });
+    assert.equal(persistedShortcut, 'meta+shift+KeyR');
+
     console.log(
       'PASS: desktop boot, real PTY I/O, resize, close, provider validation, two UI terminals, ' +
-        'manual paste without submission, room switching, removal, restart persistence, and ' +
-        'session history (ended sessions, reopen, clear history).',
+        'manual paste without submission, room switching, removal, restart persistence, session ' +
+        'history (ended sessions, reopen, clear history), and keyboard shortcuts (plain keys/' +
+        'Ctrl-C reach the shell, Meta-combo works while a terminal is focused, rebinding, ' +
+        'conflict refusal, and persistence).',
     );
   } finally {
     if (app) await app.close();

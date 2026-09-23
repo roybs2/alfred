@@ -139,6 +139,165 @@ function parseActivityHistory(raw: unknown): ActivityItem[] {
     }))
     .slice(-MAX_ACTIVITY_HISTORY);
 }
+// --- Keyboard shortcuts: configurable in the Settings view, mac-first combos only. Bindings
+// are persisted as top-level settings.shortcuts (sibling of rooms) — validated/bounded again in
+// desktop/main.cjs at the save-state IPC boundary (sanitizeShortcuts there), never trusted from
+// the renderer alone. Only the combo strings are ever stored; nothing else about "settings". ---
+type ShortcutActionId =
+  | 'newRoom'
+  | 'addSession'
+  | 'closeSession'
+  | 'nextSession'
+  | 'prevSession'
+  | 'focusSession1'
+  | 'focusSession2'
+  | 'focusSession3'
+  | 'focusSession4'
+  | 'focusSession5'
+  | 'focusSession6'
+  | 'focusSession7'
+  | 'focusSession8'
+  | 'focusSession9'
+  | 'nextRoom'
+  | 'prevRoom'
+  | 'toggleFocusMode'
+  | 'toggleActivityPanel'
+  | 'openSettings'
+  | 'focusTaskInput';
+const SHORTCUT_ACTION_IDS: ShortcutActionId[] = [
+  'newRoom',
+  'addSession',
+  'closeSession',
+  'nextSession',
+  'prevSession',
+  'focusSession1',
+  'focusSession2',
+  'focusSession3',
+  'focusSession4',
+  'focusSession5',
+  'focusSession6',
+  'focusSession7',
+  'focusSession8',
+  'focusSession9',
+  'nextRoom',
+  'prevRoom',
+  'toggleFocusMode',
+  'toggleActivityPanel',
+  'openSettings',
+  'focusTaskInput',
+];
+const SHORTCUT_LABELS: Record<ShortcutActionId, string> = {
+  newRoom: 'New room',
+  addSession: 'Add session',
+  closeSession: 'Close focused session',
+  nextSession: 'Next session',
+  prevSession: 'Previous session',
+  focusSession1: 'Focus session 1',
+  focusSession2: 'Focus session 2',
+  focusSession3: 'Focus session 3',
+  focusSession4: 'Focus session 4',
+  focusSession5: 'Focus session 5',
+  focusSession6: 'Focus session 6',
+  focusSession7: 'Focus session 7',
+  focusSession8: 'Focus session 8',
+  focusSession9: 'Focus session 9',
+  nextRoom: 'Next room',
+  prevRoom: 'Previous room',
+  toggleFocusMode: 'Toggle focus mode',
+  toggleActivityPanel: 'Toggle Room Activity panel',
+  openSettings: 'Open settings',
+  focusTaskInput: 'Focus task input of managed pane',
+};
+// Codes (KeyboardEvent.code, never .key) so a Shift-transformed symbol (Shift+] -> "}") can
+// never desync a binding from what the user actually pressed.
+const DEFAULT_SHORTCUTS: Record<ShortcutActionId, string> = {
+  newRoom: 'meta+KeyN',
+  addSession: 'meta+KeyT',
+  closeSession: 'meta+KeyW',
+  nextSession: 'meta+shift+BracketRight',
+  prevSession: 'meta+shift+BracketLeft',
+  focusSession1: 'meta+Digit1',
+  focusSession2: 'meta+Digit2',
+  focusSession3: 'meta+Digit3',
+  focusSession4: 'meta+Digit4',
+  focusSession5: 'meta+Digit5',
+  focusSession6: 'meta+Digit6',
+  focusSession7: 'meta+Digit7',
+  focusSession8: 'meta+Digit8',
+  focusSession9: 'meta+Digit9',
+  nextRoom: 'meta+alt+ArrowDown',
+  prevRoom: 'meta+alt+ArrowUp',
+  toggleFocusMode: 'meta+shift+KeyF',
+  toggleActivityPanel: 'meta+shift+KeyA',
+  openSettings: 'meta+Comma',
+  focusTaskInput: 'meta+KeyL',
+};
+// Combos that must always reach the OS/native app menu (Quit, Hide, Minimize) or standard text
+// editing (Undo/Redo, Cut/Copy/Paste, Select All) — never bindable to an app action, and never
+// swallowed, in a terminal or anywhere else in the app.
+const RESERVED_COMBOS = new Set([
+  'meta+KeyC',
+  'meta+KeyV',
+  'meta+KeyA',
+  'meta+KeyZ',
+  'meta+shift+KeyZ',
+  'meta+KeyQ',
+  'meta+KeyH',
+  'meta+KeyM',
+]);
+const MODIFIER_CODES = new Set([
+  'ControlLeft',
+  'ControlRight',
+  'AltLeft',
+  'AltRight',
+  'MetaLeft',
+  'MetaRight',
+  'ShiftLeft',
+  'ShiftRight',
+]);
+function comboFromEvent(e: KeyboardEvent): string {
+  if (MODIFIER_CODES.has(e.code)) return '';
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.metaKey) parts.push('meta');
+  if (e.shiftKey) parts.push('shift');
+  parts.push(e.code);
+  return parts.join('+');
+}
+const KEY_CODE_LABELS: Record<string, string> = {
+  BracketRight: ']',
+  BracketLeft: '[',
+  Comma: ',',
+  ArrowUp: '↑',
+  ArrowDown: '↓',
+};
+function comboLabel(combo: string): string {
+  if (!combo) return '(none)';
+  const parts = combo.split('+');
+  const key = parts.pop() || '';
+  const order: Record<string, string> = { ctrl: '⌃', alt: '⌥', shift: '⇧', meta: '⌘' };
+  const mods = ['ctrl', 'alt', 'shift', 'meta'].filter((m) => parts.includes(m)).map((m) => order[m]);
+  const keyLabel =
+    KEY_CODE_LABELS[key] ||
+    (key.startsWith('Key') ? key.slice(3) : key.startsWith('Digit') ? key.slice(5) : key);
+  return mods.join('') + keyLabel;
+}
+// A custom binding must always include ⌘ (Meta) — that is what guarantees it can never be
+// confused with plain terminal input or a Ctrl-combo the shell owns — and must never be one of
+// the reserved system combos above.
+function isValidCustomCombo(combo: string): boolean {
+  return !!combo && combo.split('+').includes('meta') && !RESERVED_COMBOS.has(combo);
+}
+function parseShortcuts(raw: unknown): Record<ShortcutActionId, string> {
+  const out = { ...DEFAULT_SHORTCUTS };
+  if (raw && typeof raw === 'object' && !Array.isArray(raw))
+    for (const id of SHORTCUT_ACTION_IDS) {
+      const combo = (raw as Record<string, unknown>)[id];
+      if (typeof combo === 'string' && isValidCustomCombo(combo)) out[id] = combo;
+    }
+  return out;
+}
 type AgentEvent = {
   type:
     | 'session-created'
@@ -559,6 +718,7 @@ const appendTranscript = (
 function TerminalPane({
   session,
   onClose,
+  closeConfirming,
   renaming,
   nameDraft,
   renameError,
@@ -570,6 +730,7 @@ function TerminalPane({
 }: {
   session: TerminalSession;
   onClose: () => void;
+  closeConfirming: boolean;
   renaming: boolean;
   nameDraft: string;
   renameError: string;
@@ -677,12 +838,12 @@ function TerminalPane({
           {session.status}
         </span>
         <button
-          className="icon-button close-pane"
-          title="Close session"
-          aria-label="Close session"
+          className={'icon-button close-pane' + (closeConfirming ? ' confirm-close' : '')}
+          title={closeConfirming ? 'Running — click again to close' : 'Close session'}
+          aria-label={closeConfirming ? 'Confirm close running session' : 'Close session'}
           onClick={onClose}
         >
-          ×
+          {closeConfirming ? '⚠' : '×'}
         </button>
       </header>
       <div className="terminal-host" ref={host} />
@@ -696,6 +857,7 @@ function TerminalPane({
 function ManagedPane({
   session,
   onClose,
+  closeConfirming,
   onRun,
   renaming,
   nameDraft,
@@ -709,6 +871,7 @@ function ManagedPane({
 }: {
   session: ManagedSession;
   onClose: () => void;
+  closeConfirming: boolean;
   onRun: (text: string) => Promise<void>;
   renaming: boolean;
   nameDraft: string;
@@ -794,12 +957,24 @@ function ManagedPane({
           {session.status}
         </span>
         <button
-          className="icon-button close-pane"
-          title={session.status === 'stopped' ? 'Remove agent session' : 'Stop agent session'}
-          aria-label={session.status === 'stopped' ? 'Remove agent session' : 'Stop agent session'}
+          className={'icon-button close-pane' + (closeConfirming ? ' confirm-close' : '')}
+          title={
+            closeConfirming
+              ? 'Running — click again to stop'
+              : session.status === 'stopped'
+                ? 'Remove agent session'
+                : 'Stop agent session'
+          }
+          aria-label={
+            closeConfirming
+              ? 'Confirm stop running agent session'
+              : session.status === 'stopped'
+                ? 'Remove agent session'
+                : 'Stop agent session'
+          }
           onClick={onClose}
         >
-          ×
+          {closeConfirming ? '⚠' : '×'}
         </button>
       </header>
       <div className="managed-transcript" ref={scroll} aria-label={session.name + ' transcript'}>
@@ -878,6 +1053,284 @@ function ManagedPane({
   );
 }
 
+// Focus-traps Tab/Shift+Tab within the given container while it is mounted, and focuses the
+// first focusable element once. Escape-to-close is handled by the app's single global keydown
+// handler (see App), never duplicated here.
+function useFocusTrap(containerRef: { current: HTMLElement | null }) {
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    const focusables = () =>
+      Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+    (focusables()[0] || root).focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (!items.length) return;
+      const idx = items.indexOf(document.activeElement as HTMLElement);
+      if (e.shiftKey && idx <= 0) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!e.shiftKey && idx === items.length - 1) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    };
+    root.addEventListener('keydown', onKeyDown);
+    return () => root.removeEventListener('keydown', onKeyDown);
+  }, [containerRef]);
+}
+
+// Keyboard-shortcut Settings view: lists every configurable action with its current binding,
+// lets the user rebind one (press-a-combo capture), refuses conflicting/invalid combos inline,
+// and can reset to defaults. Persists nothing itself — the parent owns `shortcuts` state and
+// only that state (bindings, never anything else) is written to disk (see App).
+function SettingsPanel({
+  shortcuts,
+  conflictMessage,
+  capturingId,
+  onStartCapture,
+  onCancelCapture,
+  onCaptureCombo,
+  onReset,
+  onClose,
+}: {
+  shortcuts: Record<ShortcutActionId, string>;
+  conflictMessage: string;
+  capturingId: ShortcutActionId | '';
+  onStartCapture: (id: ShortcutActionId) => void;
+  onCancelCapture: () => void;
+  onCaptureCombo: (id: ShortcutActionId, combo: string) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(containerRef);
+  useEffect(() => {
+    if (!capturingId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (MODIFIER_CODES.has(e.code)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        onCancelCapture();
+        return;
+      }
+      const combo = comboFromEvent(e);
+      if (combo) onCaptureCombo(capturingId, combo);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [capturingId, onCaptureCombo, onCancelCapture]);
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div
+        className="modal settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        tabIndex={-1}
+        ref={containerRef}
+      >
+        <header className="modal-head">
+          <h2 id="settings-title">Keyboard shortcuts</h2>
+          <button className="icon-button" aria-label="Close settings" onClick={onClose}>
+            ×
+          </button>
+        </header>
+        <p className="modal-copy">
+          Click Change, then press the new key combo. Every shortcut must include ⌘ so it can
+          never be confused with plain terminal input or a Ctrl-combo the shell owns.
+        </p>
+        {conflictMessage && (
+          <div className="settings-conflict" role="alert">
+            {conflictMessage}
+          </div>
+        )}
+        <ul className="shortcut-list">
+          {SHORTCUT_ACTION_IDS.map((id) => (
+            <li className="shortcut-row" key={id}>
+              <span className="shortcut-label">{SHORTCUT_LABELS[id]}</span>
+              {capturingId === id ? (
+                <span className="shortcut-capturing">
+                  Press a combo…
+                  <button className="subtle-button" onClick={onCancelCapture}>
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <>
+                  <kbd className="shortcut-combo">{comboLabel(shortcuts[id])}</kbd>
+                  <button
+                    className="subtle-button"
+                    aria-label={'Change binding for ' + SHORTCUT_LABELS[id]}
+                    onClick={() => onStartCapture(id)}
+                  >
+                    Change
+                  </button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+        <footer className="modal-foot">
+          <button className="subtle-button" onClick={onReset}>
+            Reset to defaults
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// Row config for "Add multiple…": one Terminal (shell) row plus one managed-agent row per known
+// provider. Launching respects the room's managed-session policy (maxAgents) and the app-wide
+// terminal session cap (MAX_SESSIONS in desktop/main.cjs) — both enforced again server-side
+// regardless of what this dialog computes.
+const ADD_MULTIPLE_ROWS: { provider: Provider; kind: Session['kind']; label: string }[] = [
+  { provider: 'shell', kind: 'terminal', label: providerInfo.shell.label },
+  ...providers
+    .filter((p) => p.id !== 'shell')
+    .map((p) => ({ provider: p.id, kind: 'managed' as const, label: p.label + ' agent' })),
+];
+const APP_MAX_TERMINAL_SESSIONS = 12;
+function AddMultipleDialog({
+  agents,
+  maxAgents,
+  managedCount,
+  runningTerminalCount,
+  onLaunch,
+  onClose,
+}: {
+  agents: Agent[];
+  maxAgents: number;
+  managedCount: number;
+  runningTerminalCount: number;
+  onLaunch: (rows: { provider: Provider; kind: Session['kind']; count: number }[]) => Promise<void>;
+  onClose: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(containerRef);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [error, setError] = useState('');
+  const [launching, setLaunching] = useState(false);
+  const key = (row: (typeof ADD_MULTIPLE_ROWS)[number]) => row.provider + ':' + row.kind;
+  const setCount = (row: (typeof ADD_MULTIPLE_ROWS)[number], value: number) =>
+    setCounts((prev) => ({ ...prev, [key(row)]: Math.max(0, Math.min(12, Math.round(value) || 0)) }));
+  async function launch() {
+    const rows = ADD_MULTIPLE_ROWS.map((row) => ({ ...row, count: counts[key(row)] || 0 })).filter(
+      (row) => row.count > 0,
+    );
+    if (!rows.length) {
+      setError('Choose at least one session to add.');
+      return;
+    }
+    const unavailable = rows.filter((row) => {
+      if (row.provider === 'shell') return false;
+      const agent = agents.find((a) => a.id === row.provider);
+      return agent && !agent.available;
+    });
+    if (unavailable.length) {
+      setError(
+        unavailable.map((row) => row.label).join(', ') + ' not detected on this computer.',
+      );
+      return;
+    }
+    const managedRequested = rows
+      .filter((row) => row.kind === 'managed')
+      .reduce((sum, row) => sum + row.count, 0);
+    const terminalRequested = rows
+      .filter((row) => row.kind === 'terminal')
+      .reduce((sum, row) => sum + row.count, 0);
+    if (managedCount + managedRequested > maxAgents) {
+      setError(
+        `That is ${managedCount + managedRequested} agent sessions, above this room's limit of ${maxAgents}. Lower a count or raise the room's session limit.`,
+      );
+      return;
+    }
+    if (runningTerminalCount + terminalRequested > APP_MAX_TERMINAL_SESSIONS) {
+      setError(
+        `That is ${runningTerminalCount + terminalRequested} terminal sessions, above the app-wide limit of ${APP_MAX_TERMINAL_SESSIONS}.`,
+      );
+      return;
+    }
+    setError('');
+    setLaunching(true);
+    try {
+      await onLaunch(rows);
+      onClose();
+    } catch (err) {
+      setError('Could not launch every session: ' + String(err));
+    } finally {
+      setLaunching(false);
+    }
+  }
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div
+        className="modal add-multiple-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-multiple-title"
+        tabIndex={-1}
+        ref={containerRef}
+      >
+        <header className="modal-head">
+          <h2 id="add-multiple-title">Add multiple sessions</h2>
+          <button className="icon-button" aria-label="Close add multiple" onClick={onClose}>
+            ×
+          </button>
+        </header>
+        <p className="modal-copy">
+          Choose a count per provider and launch them all at once. Managed sessions get unique
+          names automatically.
+        </p>
+        {error && (
+          <div className="settings-conflict" role="alert">
+            {error}
+          </div>
+        )}
+        <ul className="add-multiple-list">
+          {ADD_MULTIPLE_ROWS.map((row) => {
+            const agent = agents.find((a) => a.id === row.provider);
+            const disabled = row.provider !== 'shell' && agent && !agent.available;
+            return (
+              <li className="add-multiple-row" key={key(row)}>
+                <span className={'provider-mark ' + row.provider}>{providerMark(row.provider)}</span>
+                <span className="add-multiple-label">
+                  {row.label}
+                  {disabled && <small> · not detected</small>}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={12}
+                  aria-label={'Count of ' + row.label}
+                  disabled={!!disabled}
+                  value={counts[key(row)] || 0}
+                  onChange={(e) => setCount(row, Number(e.target.value))}
+                />
+              </li>
+            );
+          })}
+        </ul>
+        <footer className="modal-foot">
+          <button className="subtle-button" disabled={launching} onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary-button add-multiple-launch" disabled={launching} onClick={() => void launch()}>
+            {launching ? 'Launching…' : 'Launch'}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const bridge = window.rooms;
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -916,6 +1369,30 @@ export default function App() {
   const [loadingState, setLoadingState] = useState(!!bridge);
   const canPersist = useRef(false);
   const lastSavedMetadata = useRef('');
+  // Keyboard shortcuts (Settings view): bindings only, persisted as top-level settings.shortcuts
+  // (sanitized again in desktop/main.cjs). `target` doubles as "the focused session" for
+  // shortcut actions (close/next/prev/focus-task-input) — the same id focusSession() sets.
+  const [shortcuts, setShortcuts] = useState<Record<ShortcutActionId, string>>(DEFAULT_SHORTCUTS);
+  const shortcutsRef = useRef(shortcuts);
+  shortcutsRef.current = shortcuts;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
+  const [capturingAction, setCapturingAction] = useState<ShortcutActionId | ''>('');
+  const capturingActionRef = useRef(capturingAction);
+  capturingActionRef.current = capturingAction;
+  const [shortcutConflict, setShortcutConflict] = useState('');
+  const [focusMode, setFocusMode] = useState(false);
+  const focusModeRef = useRef(focusMode);
+  focusModeRef.current = focusMode;
+  const [activityHidden, setActivityHidden] = useState(false);
+  const [addMultipleOpen, setAddMultipleOpen] = useState(false);
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  // Inline "confirm to close" arming for a running session (⌘W and the pane's own × button both
+  // route through requestCloseSession below) — never a silent kill of a running process.
+  const [confirmCloseId, setConfirmCloseId] = useState('');
+  const confirmCloseTimer = useRef<number | undefined>(undefined);
   const appendActivity = useCallback(
     (text: string, kind: 'system' | 'user' | 'warning' = 'system', roomId?: string) => {
       const id = roomId || selectedRef.current;
@@ -1012,6 +1489,7 @@ export default function App() {
       .then(async (raw) => {
         if (!active) return;
         const rows = Array.isArray(raw) ? raw : (raw as any)?.rooms;
+        setShortcuts(parseShortcuts((raw as any)?.settings?.shortcuts));
         const restored = (Array.isArray(rows) ? rows : [])
           .filter((r: any) => r && typeof r.id === 'string' && typeof r.cwd === 'string')
           .map((r: any) => ({
@@ -1320,15 +1798,17 @@ export default function App() {
           .slice(-MAX_ACTIVITY_HISTORY),
       };
     });
-    const signature = JSON.stringify(metadata);
+    // A global app setting, not per-room: only the shortcut bindings, never anything else.
+    const settings = { shortcuts };
+    const signature = JSON.stringify({ metadata, settings });
     if (signature !== lastSavedMetadata.current) {
       lastSavedMetadata.current = signature;
-      void bridge.saveState({ rooms: metadata }).catch(() => {
+      void bridge.saveState({ rooms: metadata, settings }).catch(() => {
         lastSavedMetadata.current = '';
         setNotice('Could not save rooms. Your running sessions are still available.');
       });
     }
-  }, [rooms, bridge, loadingState, sessionHistoryByRoom, activityByRoom, mergedSessionHistory]);
+  }, [rooms, bridge, loadingState, sessionHistoryByRoom, activityByRoom, mergedSessionHistory, shortcuts]);
   const current = rooms.find((r) => r.id === selected);
   async function addRoom() {
     if (!bridge) {
@@ -1371,26 +1851,17 @@ export default function App() {
       ],
     }));
   }
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
-        event.preventDefault();
-        void addRoom();
-      }
-      if (event.key === 'Escape') {
-        setPicker(false);
-        setMenu(false);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [bridge]);
   async function addSession(
     provider: Provider,
     kind: Session['kind'],
     // Set only when resuming a previously-ended managed session (see resumeManagedSession):
     // an opaque provider session/thread id, never a credential (doc/decisions.md).
     providerSessionId?: string,
+    // Set only by "Add multiple…" (see launchMultiple): that flow pre-computes every name up
+    // front from one snapshot, since calling addSession several times in a row races the
+    // render/effect cycle that keeps roomsRef current, and duplicate numbering has been
+    // observed from relying on it across immediately-consecutive calls.
+    nameOverride?: string,
   ) {
     if (!current) return;
     setPicker(false);
@@ -1409,7 +1880,8 @@ export default function App() {
     const sessionId = makeId(),
       roomId = current.id,
       cwd = current.cwd;
-    const name = sessionName(current.sessions, provider, kind);
+    const liveRoom = roomsRef.current.find((r) => r.id === roomId) || current;
+    const name = nameOverride || sessionName(liveRoom.sessions, provider, kind);
     if (kind === 'managed') {
       try {
         const created = await bridge.createAgentSession({
@@ -1508,6 +1980,24 @@ export default function App() {
       appendActivity(session.name + ' closed.', 'system', owner.id);
     }
   }
+  // Shared close path for both the pane's own × button and the ⌘W shortcut: a running process
+  // is never killed silently. The first click/press only arms an inline confirmation (the ×
+  // button switches to a "confirm close" state for 4s); a second click/press while armed — or
+  // any close request for a session that isn't running — closes it immediately.
+  const requestCloseSession = useCallback(
+    (session: Session) => {
+      const running = session.status === 'running';
+      window.clearTimeout(confirmCloseTimer.current);
+      if (!running || confirmCloseId === session.id) {
+        setConfirmCloseId('');
+        void closeSession(session);
+        return;
+      }
+      setConfirmCloseId(session.id);
+      confirmCloseTimer.current = window.setTimeout(() => setConfirmCloseId(''), 4000);
+    },
+    [confirmCloseId],
+  );
   const focusSession = useCallback((id: string) => {
     document.getElementById('pane-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     terminalRegistry.get(id)?.focus();
@@ -1774,6 +2264,151 @@ export default function App() {
       setNotice('The note was not pasted. Check that the session is still running.');
     }
   }
+  // --- Keyboard shortcuts: dispatch only (see Settings panel for rebinding). A single
+  // capture-phase window listener, registered once, always reads the latest bindings/state
+  // through refs so it never needs to re-subscribe. ---
+  const rebindShortcut = useCallback((id: ShortcutActionId, combo: string): boolean => {
+    if (!isValidCustomCombo(combo)) {
+      setShortcutConflict('Shortcuts must include ⌘ and cannot use a combo reserved by the system.');
+      return false;
+    }
+    const conflictId = (Object.entries(shortcutsRef.current) as [ShortcutActionId, string][]).find(
+      ([otherId, bound]) => otherId !== id && bound === combo,
+    )?.[0];
+    if (conflictId) {
+      setShortcutConflict('Already used by "' + SHORTCUT_LABELS[conflictId] + '". Choose another combo.');
+      return false;
+    }
+    setShortcuts((prev) => ({ ...prev, [id]: combo }));
+    setShortcutConflict('');
+    return true;
+  }, []);
+  const resetShortcuts = useCallback(() => {
+    setShortcuts({ ...DEFAULT_SHORTCUTS });
+    setShortcutConflict('');
+  }, []);
+  const onCaptureCombo = useCallback(
+    (id: ShortcutActionId, combo: string) => {
+      if (rebindShortcut(id, combo)) setCapturingAction('');
+    },
+    [rebindShortcut],
+  );
+  function runShortcutAction(id: ShortcutActionId) {
+    if (id === 'newRoom') {
+      void addRoom();
+      return;
+    }
+    if (id === 'openSettings') {
+      setSettingsOpen(true);
+      return;
+    }
+    if (id === 'toggleFocusMode') {
+      setFocusMode((v) => !v);
+      return;
+    }
+    if (id === 'toggleActivityPanel') {
+      setActivityHidden((v) => !v);
+      return;
+    }
+    if (!current) return;
+    if (id === 'addSession') {
+      setPicker(true);
+      return;
+    }
+    if (id === 'closeSession') {
+      const session = current.sessions.find((s) => s.id === targetRef.current);
+      if (session) requestCloseSession(session);
+      return;
+    }
+    if (id === 'nextSession' || id === 'prevSession') {
+      const list = current.sessions;
+      if (!list.length) return;
+      const idx = list.findIndex((s) => s.id === targetRef.current);
+      const step = id === 'nextSession' ? 1 : -1;
+      const next = idx === -1 ? list[0] : list[(idx + step + list.length) % list.length];
+      focusSession(next.id);
+      return;
+    }
+    if (id.startsWith('focusSession')) {
+      const n = Number(id.slice('focusSession'.length));
+      const session = current.sessions[n - 1];
+      if (session) focusSession(session.id);
+      return;
+    }
+    if (id === 'nextRoom' || id === 'prevRoom') {
+      if (rooms.length < 2) return;
+      const idx = rooms.findIndex((r) => r.id === selected);
+      const step = id === 'nextRoom' ? 1 : -1;
+      const next = rooms[(idx + step + rooms.length) % rooms.length];
+      setSelected(next.id);
+      setTarget('');
+      return;
+    }
+    if (id === 'focusTaskInput') {
+      const managed =
+        current.sessions.find((s) => s.id === targetRef.current && s.kind === 'managed') ||
+        current.sessions.find((s) => s.kind === 'managed');
+      if (managed) {
+        setTarget(managed.id);
+        window.setTimeout(
+          () => document.querySelector<HTMLTextAreaElement>('#pane-' + managed.id + ' textarea')?.focus(),
+          0,
+        );
+      }
+    }
+  }
+  const actionHandlerRef = useRef(runShortcutAction);
+  actionHandlerRef.current = runShortcutAction;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      // Settings' own "press a combo to bind it" capture consumes the very next keypress
+      // itself (see SettingsPanel); the app must never also dispatch an action for it.
+      if (capturingActionRef.current) return;
+      if (event.key === 'Escape') {
+        if (settingsOpenRef.current) {
+          setSettingsOpen(false);
+          return;
+        }
+        if (focusModeRef.current) {
+          setFocusMode(false);
+          return;
+        }
+        setPicker(false);
+        setMenu(false);
+        return;
+      }
+      const combo = comboFromEvent(event);
+      if (!combo || RESERVED_COMBOS.has(combo)) return;
+      const targetEl = event.target as HTMLElement | null;
+      const inTerminal = !!targetEl?.closest?.('.terminal-host, .xterm-helper-textarea');
+      // While a terminal has DOM focus, only Meta-combos may ever be handled here — plain keys
+      // and Ctrl-combos (Ctrl-C, etc.) always reach the shell untouched.
+      if (inTerminal && !combo.split('+').includes('meta')) return;
+      const match = (Object.entries(shortcutsRef.current) as [ShortcutActionId, string][]).find(
+        ([, bound]) => bound === combo,
+      );
+      if (!match) return;
+      event.preventDefault();
+      actionHandlerRef.current(match[0]);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+  // "Add multiple…": every name is numbered up front from one snapshot of the room's current
+  // sessions (never recomputed mid-flight — see nameOverride on addSession), so a whole batch
+  // gets unique auto-numbered names (e.g. "Claude 1", "Claude 2") regardless of how fast the
+  // sequential backend calls below resolve. Awaits each launch so the first real backend error
+  // (room/app session limits are re-checked there too) is still surfaced.
+  async function launchMultiple(rows: { provider: Provider; kind: Session['kind']; count: number }[]) {
+    const snapshot = (current && roomsRef.current.find((r) => r.id === current.id)?.sessions) || [];
+    const planned: { provider: Provider; kind: Session['kind']; name: string }[] = [];
+    for (const row of rows)
+      for (let i = 0; i < row.count; i++) {
+        const name = sessionName([...snapshot, ...planned] as Session[], row.provider, row.kind);
+        planned.push({ provider: row.provider, kind: row.kind, name });
+      }
+    for (const item of planned) await addSession(item.provider, item.kind, undefined, item.name);
+  }
   // --- Pane column layout: UI metadata only (no transcripts). Weights update
   // locally while a drag is in progress and only land in `rooms` (and so get
   // persisted) once the drag ends, so a drag never spams saveState. ---
@@ -1913,14 +2548,28 @@ export default function App() {
   // The room's `columns` setting is a ceiling, never a promise: at the current
   // width, fewer columns may be all that fit without dropping any pane below
   // MIN_PANE_COLUMN_PX. This is what's actually rendered.
+  // Focus mode always tiles with the same responsive Auto grid (see .terminal-stack in
+  // styles.css), regardless of the room's saved column setting — never mutates it.
   const effectiveColumns =
-    current && current.columns !== 'auto' ? maxFittingColumns(stackWidth, current.columns) : null;
+    !focusMode && current && current.columns !== 'auto'
+      ? maxFittingColumns(stackWidth, current.columns)
+      : null;
   const currentPaneGrid =
     current && effectiveColumns ? computePaneGrid(current.sessions, effectiveColumns) : null;
   const effectiveColumnWeights =
     current && effectiveColumns ? (dragWeights || current.columnWeights).slice(0, effectiveColumns) : null;
+  const currentManagedCount = current?.sessions.filter((s) => s.kind === 'managed').length || 0;
+  const globalRunningTerminalCount = rooms
+    .flatMap((r) => r.sessions)
+    .filter((s) => s.kind === 'terminal' && s.status === 'running').length;
   return (
-    <div className="app-shell">
+    <div
+      className={
+        'app-shell' +
+        (focusMode ? ' focus-mode' : '') +
+        (!focusMode && activityHidden ? ' activity-hidden' : '')
+      }
+    >
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-glyph">◈</span>
@@ -1933,7 +2582,8 @@ export default function App() {
           className="new-room"
           onClick={() => void addRoom()}
         >
-          <span className="plus">＋</span> New room <span className="shortcut">⌘ N</span>
+          <span className="plus">＋</span> New room{' '}
+          <span className="shortcut">{comboLabel(shortcuts.newRoom)}</span>
         </button>
         <div className="rooms-heading">
           <span>ROOMS</span>
@@ -2099,6 +2749,23 @@ export default function App() {
               <div className="topbar-right">
                 {!bridge && <span className="preview-badge">PREVIEW</span>}
                 <button
+                  aria-label="Toggle focus mode"
+                  aria-pressed={focusMode}
+                  className={'top-icon' + (focusMode ? ' active' : '')}
+                  title={'Focus mode (' + comboLabel(shortcuts.toggleFocusMode) + ')'}
+                  onClick={() => setFocusMode((v) => !v)}
+                >
+                  ⛶
+                </button>
+                <button
+                  aria-label="Open settings"
+                  className="top-icon"
+                  title={'Settings (' + comboLabel(shortcuts.openSettings) + ')'}
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  ⚙
+                </button>
+                <button
                   aria-label="Room options"
                   className="top-icon"
                   title="Room options"
@@ -2232,7 +2899,11 @@ export default function App() {
                       ))}
                     </div>
                     <div className="add-wrap">
-                      <button className="add-session" onClick={() => setPicker(!picker)}>
+                      <button
+                        className="add-session"
+                        title={'Add session (' + comboLabel(shortcuts.addSession) + ')'}
+                        onClick={() => setPicker(!picker)}
+                      >
                         <span>＋</span> Add session <span className="chevron">⌄</span>
                       </button>
                     {picker && (
@@ -2284,6 +2955,21 @@ export default function App() {
                               </button>
                             );
                           })}
+                        <div className="picker-group">BULK</div>
+                        <button
+                          key="add-multiple"
+                          onClick={() => {
+                            setPicker(false);
+                            setAddMultipleOpen(true);
+                          }}
+                        >
+                          <span className="provider-mark">▤</span>
+                          <span className="picker-text">
+                            <b>Add multiple…</b>
+                            <small>Launch several sessions at once</small>
+                          </span>
+                          <span className="picker-arrow">↗</span>
+                        </button>
                       </div>
                     )}
                   </div>
@@ -2326,6 +3012,7 @@ export default function App() {
                             <TerminalPane
                               session={session}
                               onClose={() => void closeSession(session)}
+                              closeConfirming={confirmCloseId === session.id}
                               renaming={renamingSessionId === session.id}
                               nameDraft={
                                 renamingSessionId === session.id ? sessionNameDraft : session.name
@@ -2341,6 +3028,7 @@ export default function App() {
                             <ManagedPane
                               session={session}
                               onClose={() => void closeSession(session)}
+                              closeConfirming={confirmCloseId === session.id}
                               onRun={(text) => runAgentTask(session, text)}
                               renaming={renamingSessionId === session.id}
                               nameDraft={
@@ -2680,6 +3368,38 @@ export default function App() {
         )}
       </main>
       {notice && <div className="toast">{notice}</div>}
+      {settingsOpen && (
+        <SettingsPanel
+          shortcuts={shortcuts}
+          conflictMessage={shortcutConflict}
+          capturingId={capturingAction}
+          onStartCapture={(id) => {
+            setShortcutConflict('');
+            setCapturingAction(id);
+          }}
+          onCancelCapture={() => {
+            setCapturingAction('');
+            setShortcutConflict('');
+          }}
+          onCaptureCombo={onCaptureCombo}
+          onReset={resetShortcuts}
+          onClose={() => {
+            setSettingsOpen(false);
+            setCapturingAction('');
+            setShortcutConflict('');
+          }}
+        />
+      )}
+      {addMultipleOpen && current && (
+        <AddMultipleDialog
+          agents={agents}
+          maxAgents={current.maxAgents}
+          managedCount={currentManagedCount}
+          runningTerminalCount={globalRunningTerminalCount}
+          onLaunch={launchMultiple}
+          onClose={() => setAddMultipleOpen(false)}
+        />
+      )}
     </div>
   );
 }

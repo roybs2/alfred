@@ -8,6 +8,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+// Review screenshots go to AGENT_ROOMS_SCREENSHOT_DIR, or a temp directory, never into the repo.
+const SCREENSHOT_DIR = (process.env.AGENT_ROOMS_SCREENSHOT_DIR ||
+  path.join(os.tmpdir(), 'alfred-smoke-screenshots')).replace(/\/?$/, '/');
+fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
 (async () => {
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-managed-ui-'));
   let app;
@@ -768,8 +773,88 @@ const path = require('node:path');
     await page.getByRole('button', { name: /Clear history for/ }).click();
     await page.locator('.session-history').waitFor({ state: 'detached' });
 
+    // --- "Add multiple…" and focus mode: a fresh, isolated room so it never disturbs the
+    // session ordering/counts other assertions above depend on. Uses real terminal (shell)
+    // sessions only — claude/codex/cursor executables are not guaranteed to be installed in
+    // this test environment, and this never launches billable agent work either way. ---
+    await page.getByRole('button', { name: 'New room' }).click();
+    await page.getByRole('heading', { name: 'This room is ready.' }).waitFor();
+    const bulkRoomId = await page.evaluate(async () => {
+      const state = await window.rooms.loadState();
+      return state.rooms.at(-1).id;
+    });
+    assert.notEqual(bulkRoomId, roomId);
+
+    await page.getByRole('button', { name: /Add session/ }).click();
+    await page.locator('.picker-menu').getByRole('button', { name: /Add multiple/ }).click();
+    const addMultipleDialog = page.getByRole('dialog', { name: 'Add multiple sessions' });
+    await addMultipleDialog.waitFor();
+    assert.equal(await addMultipleDialog.getAttribute('aria-modal'), 'true');
+    await addMultipleDialog.getByLabel('Count of Terminal').fill('6');
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: SCREENSHOT_DIR + 'final-add-multiple.png' });
+    await addMultipleDialog.getByRole('button', { name: 'Launch' }).click();
+    await addMultipleDialog.waitFor({ state: 'detached' });
+    await page.waitForFunction(
+      () => document.querySelectorAll('.pane-anchor:not(.pane-hidden) .terminal-card').length === 6,
+    );
+    const bulkNames = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.pane-anchor:not(.pane-hidden) .pane-name')).map(
+        (el) => el.textContent,
+      ),
+    );
+    assert.equal(bulkNames.length, new Set(bulkNames).size, 'Add multiple must give every session a unique name');
+    assert.ok(
+      bulkNames.every((name) => /^Terminal \d$/.test(name || '')),
+      'Managed/terminal sessions from Add multiple are auto-numbered (e.g. "Terminal 1")',
+    );
+
+    // Focus mode: collapses the sidebar and Room Activity panel (still present in the DOM —
+    // no state is lost — just hidden via CSS) and tiles every session in the room with no
+    // overlap — toggled by the header button or ⌘⇧F, exited by Esc or the toggle.
+    const sidebar = page.locator('.sidebar');
+    const activityPanel = page.locator('.activity-panel');
+    assert.equal(await sidebar.isVisible(), true);
+    assert.equal(await activityPanel.isVisible(), true);
+    await page.getByRole('button', { name: 'Toggle focus mode' }).click();
+    await sidebar.waitFor({ state: 'hidden' });
+    await activityPanel.waitFor({ state: 'hidden' });
+    await assertPanesDontOverlap('Focus mode with 6 tiled sessions');
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: SCREENSHOT_DIR + 'final-focus-mode.png' });
+
+    // Esc exits focus mode.
+    await page.keyboard.press('Escape');
+    await sidebar.waitFor({ state: 'visible' });
+    await activityPanel.waitFor({ state: 'visible' });
+
+    // The toggle also exits it, and the ⌘⇧A shortcut independently hides/shows just the Room
+    // Activity panel (sidebar stays visible), without touching focus mode's own state.
+    await page.getByRole('button', { name: 'Toggle focus mode' }).click();
+    await sidebar.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Toggle focus mode' }).click();
+    await sidebar.waitFor({ state: 'visible' });
+    await page.keyboard.press('Meta+Shift+A');
+    await activityPanel.waitFor({ state: 'hidden' });
+    assert.equal(await sidebar.isVisible(), true, 'Toggling just the activity panel must leave the sidebar alone');
+    await page.keyboard.press('Meta+Shift+A');
+    await activityPanel.waitFor({ state: 'visible' });
+
+    // Settings view: opened by the gear button, focus-trapped, labelled dialog. Shows the
+    // current binding for every action and lets it be changed (see tests/smoke.cjs for the
+    // rebind/conflict/persistence coverage against a real shell).
+    await page.getByRole('button', { name: 'Open settings' }).click();
+    const settingsDialog = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    await settingsDialog.waitFor();
+    assert.equal(await settingsDialog.getAttribute('aria-modal'), 'true');
+    await settingsDialog.getByText('Focus task input of managed pane').waitFor();
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: SCREENSHOT_DIR + 'final-settings.png' });
+    await page.keyboard.press('Escape');
+    await settingsDialog.waitFor({ state: 'detached' });
+
     console.log(
-      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), safe Markdown transcript rendering (incl. inert script/img), provider-reported usage display and running totals, resizable/keyboard-accessible column layout with persistence, layout at the minimum window width, and persisted session history with Resume (opaque providerSessionId round-trip, synthetic engine, no real provider call).',
+      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), safe Markdown transcript rendering (incl. inert script/img), provider-reported usage display and running totals, resizable/keyboard-accessible column layout with persistence, layout at the minimum window width, persisted session history with Resume (opaque providerSessionId round-trip, synthetic engine, no real provider call), Add multiple (unique auto-numbered names, respects limits), and focus mode / Room Activity panel toggle (no overlap, Esc exits).',
     );
   } finally {
     if (app) await app.close();

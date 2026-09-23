@@ -30,8 +30,16 @@ function backendHarness(extraEnv = {}, { seedUserData } = {}) {
     on: (name, fn) => appHandlers.set(name, fn),
     quit() {},
   };
+  let lastMenuTemplate;
   const electron = {
     app,
+    Menu: {
+      buildFromTemplate: (template) => {
+        lastMenuTemplate = template;
+        return { template };
+      },
+      setApplicationMenu() {},
+    },
     BrowserWindow: class {
       constructor() {
         this.webContents = webContents;
@@ -108,6 +116,7 @@ function backendHarness(extraEnv = {}, { seedUserData } = {}) {
     readyWindow,
     sent,
     userData,
+    menuTemplate: () => lastMenuTemplate,
     event: () => ({ sender: webContents, senderFrame: mainFrame }),
     invoke: (channel, ...args) =>
       handlers.get(channel)({ sender: webContents, senderFrame: mainFrame }, ...args),
@@ -381,6 +390,67 @@ test('engine createSession accepts an opaque providerSessionId for resume and va
       }),
     /provider session id/,
   );
+});
+
+test('application menu never binds Cmd+W (renderer owns closing a focused session)', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const template = h.menuTemplate();
+    assert.ok(Array.isArray(template) && template.length > 0, 'A custom application menu must be built');
+    const flatten = (items) =>
+      items.flatMap((item) => [item, ...(Array.isArray(item.submenu) ? flatten(item.submenu) : [])]);
+    const items = flatten(template);
+    assert.ok(
+      !items.some((item) => item.role === 'close' || item.accelerator === 'CmdOrCtrl+W'),
+      'No menu item may bind Cmd+W — that would double-handle the renderer\'s "close session" shortcut',
+    );
+    // Standard editing/system combos the renderer must never hijack stay available natively.
+    assert.ok(items.some((item) => item.role === 'quit'));
+    assert.ok(items.some((item) => item.role === 'hide'));
+    assert.ok(items.some((item) => item.role === 'minimize'));
+    assert.ok(items.some((item) => item.role === 'copy'));
+    assert.ok(items.some((item) => item.role === 'paste'));
+    assert.ok(items.some((item) => item.role === 'selectAll'));
+    assert.ok(items.some((item) => item.role === 'undo'));
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
+test('persisted settings.shortcuts round-trips only known action ids with valid combo strings', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const state = {
+      rooms: [],
+      settings: {
+        shortcuts: {
+          newRoom: 'meta+KeyN',
+          toggleFocusMode: 'meta+shift+KeyF',
+          // Unknown action id must be dropped.
+          notARealAction: 'meta+KeyX',
+          // Non-string / malformed combos must be dropped.
+          closeSession: 42,
+          nextRoom: 'meta+alt+ArrowDown; rm -rf /',
+          // Oversized combo must be dropped.
+          prevRoom: 'meta+' + 'x'.repeat(60),
+        },
+        // Unknown top-level settings keys must be dropped.
+        somethingElse: 'nope',
+      },
+    };
+    h.invoke('rooms:save-state', state);
+    const loaded = h.invoke('rooms:load-state');
+    // Compared via JSON (rather than assert.deepEqual): the loaded object comes back from a
+    // separate vm realm inside this test harness, so only its serialized shape matters.
+    assert.equal(
+      JSON.stringify(loaded.settings),
+      JSON.stringify({ shortcuts: { newRoom: 'meta+KeyN', toggleFocusMode: 'meta+shift+KeyF' } }),
+    );
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
 });
 
 test('renaming to Alfred migrates saved rooms from the old agent-rooms userData directory', async () => {
