@@ -1,84 +1,160 @@
 # Task tracker
 
-Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and tested on this Mac. Automated agent delegation is not implemented. This file is the handoff point for continued work.
+Updated 2026-09-23. Alfred is a working Mac-first Electron app: local PTY terminals, headless
+managed-agent sessions for Claude Code, Codex and Cursor CLI, a per-room MCP bridge for
+`room_send`/`room_spawn` delegation, opt-in room policies, recovery after restart, configurable
+shortcuts, focus mode, and macOS packaging. Claude and Cursor delegation are verified live
+end-to-end, including a real multi-agent build (2 Claude + 2 Cursor). Codex's adapter is
+implemented and its bridge startup/parsing are verified live, but a full model turn is still
+pending a CLI upgrade. `npm test` passes 45/45. This file is the handoff point for continued work.
 
 ## Done — foundation
 
-- [x] New standalone Git project in `/Users/roy/repos/agent-rooms`.
-- [x] Name and license decided by the owner (2026-09-22): product is **Alfred**, license **Apache-2.0**. See decisions.md.
 - [x] Electron + React + TypeScript + xterm.js + node-pty with lockfile.
 - [x] Isolated renderer, narrow preload API, main-frame IPC validation, CSP, provider allowlist.
 - [x] Create, rename, switch and remove rooms; select a project directory.
 - [x] Vertical session entries grouped under rooms; focus terminal from sidebar.
 - [x] Real PTY shell input/output, resize, close and process-exit events.
-- [x] Detect installed Claude Code and Codex; launch actions implemented through the same PTY path.
+- [x] Detect installed Claude Code, Codex and Cursor CLI; launch through the same PTY path.
 - [x] Side-by-side terminal panes; retain terminal instances when switching rooms.
 - [x] Room-scoped activity for session lifecycle and manual paste.
-- [x] Manual paste normalizes to one line, removes control characters, and never adds Enter. This is not automated delegation or lossless context transfer.
-- [x] Persist room names/paths only; restart never pretends terminated sessions are live.
-- [x] Bound session count (12), activity (80 per room), and saved metadata (1 MiB).
+- [x] Manual paste normalizes to one line, removes control characters, and never adds Enter.
+- [x] Bound session count (12), activity (80 live per room), and saved metadata (1 MiB).
 - [x] Close PTYs when removing a room or closing the app.
-- [x] Five backend tests pass.
 - [x] Production typecheck/build pass.
-- [x] Real Electron/PTY smoke passes: UI room creation, two shells, input/output, safe manual paste, switching, removal, metadata restoration after restart.
-- [x] Actual app screenshot: [workspace](screenshots/workspace.png).
 - [x] npm audit reports no known vulnerabilities at initial installation.
 
-## Capability validation — partial
+## Done — managed agents, bridge and delegation
 
-- [x] Inspect installed CLI help without dispatching model tasks: Claude Code 2.1.280, Codex CLI 0.149.1.
-- [x] Record Codex queue/agents/app-server and Claude background/attach/logs/stop paths.
-- [x] Read official App Server and Agent SDK overview; document authentication caveat.
-- [ ] Manually validate Claude and Codex interactive sessions with the user's chosen authentication. Detection is verified; model work has not been exercised by the smoke test.
-- [x] Live-verify (2026-09-22) Claude managed path: bridge init status, session id, resume, headless room_send delivery to Codex, permission-denial behavior under default mode. Evidence in adapters.md.
-- [x] Live-verify Codex required-bridge startup/failure and JSONL event parsing; live-verify cancellation (SIGTERM, bridge grandchild gone, task-failed).
-- [x] Fix: Claude runner aborts at init when the room bridge failed/missing (was letting a billable turn run); Codex runner surfaces inner API error text and maps required-bridge startup failure.
-- [x] Add explicit off-by-default "Pre-approve room tools" room policy (scoped Claude --allowedTools / Codex per-tool approval_mode; Codex enabled_tools limited to room tools). Unit and managed UI smoke tests.
-- [ ] Live-verify a successful Codex turn, `codex exec resume`, Codex-initiated room_send, and that pre-approval suppresses denials (blocked: configured Codex model needs newer CLI; account usage limit).
-- [x] Surface provider permission denials: runner `onPermissionDenied` → engine event `{type:'permission-denied', sessionId, roomId, taskId, text}` (tool name + short provider reason, ≤300 chars, never tool input). Sources: Claude `system/permission_denied` + `result.permission_denials` (deduped by tool_use_id); Cursor `tool_call.completed…result.rejected` (live-verified 2026-09-22). Codex has no documented denial event, so none is emitted. Unit tested. UI rendering pending (renderer owner).
-- [x] Cursor CLI (2026.09.18-9a7762b) as a third provider (2026-09-22, evidence in adapters.md):
-  - PTY: detected as `cursor-agent` (not the generic `agent` alias), in the provider allowlist. The UI picker list in `src/App.tsx` is hardcoded and still needs a Cursor entry.
-  - Managed: `-p --output-format stream-json --stream-partial-output`, session id, and `--resume` verified live. The room bridge loads through a temporary `--plugin-dir` (never project or ~/.cursor files). Claude→Cursor `room_send` verified live.
-  - Room-tool approval: under Cursor's default permission mode the bridge tools are auto-rejected in print mode (verified live). No per-process per-tool allow exists, so the room's pre-approve policy has no effect for Cursor. Workspace trust is never passed; an untrusted folder fails with a clear message.
-- [ ] Cursor: live-verify a Cursor-initiated `room_send` that is allowed (needs a user-owned `Mcp(...)` allow rule), `room_spawn`, and cancellation.
-- [ ] Verify owned session identity, message delivery acknowledgement, busy-session behavior, delegated-call cancellation, and room_spawn against real providers.
-- [ ] Prove whether native subagent delegation can be redirected to another provider. Do not infer this from CLI launch or queue support.
+- [x] `AgentEngine` (`desktop/agent-engine.cjs`) manages headless provider sessions, a
+      `BridgeBroker` listening on loopback with per-task bridge tokens, and `room-mcp-bridge.mjs`
+      exposing `room_send`/`room_spawn` as a per-process MCP server over that broker.
+- [x] Headless runners (`desktop/agent-runner.cjs`) for Claude (`stream-json`), Codex (`exec --json`)
+      and Cursor (`-p --output-format stream-json`), with resume, cancellation, bridge-init checks,
+      and scoped opt-in room-tool pre-approval.
+- [x] Stability fixes: test-hang fix (broker connections), stale-token race, cycle-detection gap,
+      abort-before-spawn when the room bridge is missing/failed, long-running tool timeouts.
+- [x] Delegation delivery envelope: a fixed reply-instruction line appended to every `room_send`/
+      `room_spawn` provenance header (owner decision, see decisions.md).
+- [x] Permission-denied events: `{type:'permission-denied', sessionId, roomId, taskId, text}` for
+      Claude and Cursor denials (Codex has no documented denial event, so none is emitted).
+- [x] Delegation tree in Room Activity, resolved by session id with provider labels, live even
+      across renames.
+- [x] Provider-reported usage only (never estimated): Claude cost + tokens, Codex tokens, Cursor
+      tokens, surfaced on `task-completed` only when the provider actually reported it.
+- [x] Session rename calls `rooms:rename-agent-session`, renaming the real `AgentEngine` session so
+      `room_send` addresses the new name immediately; UI applies the rename only on backend success.
+- [x] Hand-written React Markdown renderer for agent output (no raw HTML); nested lists, `<ol start>`
+      numbering, and underscore-in-identifier fixes from the final e2e run.
 
-## Next — native-friendly collaboration
+## Done — providers
 
-1. Specify the smallest capability interface and preserve exact source context plus provenance.
-2. Validate one real send/receive path for each provider using its supported interface.
-3. Add a room-scoped bridge for send/spawn, with no routing LLM and no automatic context rewriting.
-4. Add room policy for authorized autonomous spawn/dispatch, allowed providers, concurrency, and stop.
-5. Display verified task/message events and parent/child relationships in Room Activity.
-6. Measure token overhead where observable; keep UI/lifecycle events out of model prompts.
-7. Test cross-provider task completion, failures, cancellation, and duplicate deliveries.
+- [x] **Claude Code**: managed sessions via `-p`/stream-json, bridge via `--mcp-config` +
+      `--strict-mcp-config`, resume, permission-denial parsing. Verified live end-to-end, including
+      as a `room_send` caller and target.
+- [x] **Cursor CLI**: PTY launch and managed headless turns (stream-json, resume); room bridge via
+      a temporary `--plugin-dir` (no project/`~/.cursor` writes, no trust/force/approve-all flags).
+      Verified live as a `room_send` target and as a caller whose own `room_send` is denied by
+      Cursor's default permission mode (expected — no per-process tool allow exists for Cursor, so
+      the room's pre-approval policy has no effect there).
+- [x] **Codex**: adapter implemented (`exec --json`, resume, per-tool `approval_mode` overrides,
+      `enabled_tools` scoping). Bridge startup and JSONL event parsing verified live (required-bridge
+      abort before any thread/model request, cancellation). A full successful turn is not yet
+      verified: the CLI installed during this work (0.149.1) rejects the configured model, and the
+      account hit its usage limit. Re-verification is pending a CLI upgrade.
+- [x] Opt-in room policies: "Allow agents to create sessions" (spawn) and per-room session limit;
+      "Pre-approve room tools" scoped to only this room's `room_send`/`room_spawn` tool names via
+      Claude `--allowedTools` / Codex `approval_mode` overrides (not applicable to Cursor — see
+      decisions.md). Unit tests cover the flag; live confirmation that it suppresses denials is
+      still pending (blocked on the same Codex CLI/usage-limit issue).
 
-## Remaining UX/release work
+## Done — UX
 
-- [ ] Resizable split handles and pane layout controls.
-- [x] Distinct names/roles for multiple sessions of the same provider: renaming a managed session now calls `rooms:rename-agent-session`, which renames the real `AgentEngine` session (so `room_send` addresses the new name immediately) and only updates the UI on backend success; unit tests cover validation, per-room case-insensitive uniqueness, and `resolveDestination` after a rename.
-- [x] Delegation transcript lines in a managed session's own pane are rendered from the live session name (source) and the target session id (current name), like Room Activity already did, instead of the names frozen into the event text.
-- [x] Better recovery and persisted activity/session display history (no sensitive transcripts by default). Per room, `desktop/main.cjs` now persists `sessionHistory` (ended sessions: id/name/provider/kind/createdAt/endedAt/finalState, plus the managed provider's own opaque session/thread id when present) and `activityHistory` (short lifecycle/delegation/permission-denied labels only, never agent output or task text), both bounded (50 sessions/200 activity items per room, oldest dropped first) and sanitized at the `rooms:save-state` IPC boundary regardless of what the renderer sends. `rooms:save-state` already wrote atomically (temp file + rename); confirmed and covered by a new test. On restart every prior session renders as `ended` (never running/idle); a managed entry with a provider session id gets **Resume** (`AgentEngine.createSession({..., providerSessionId })`, validated as a short opaque string — never a credential, see decisions.md — so the provider's own CLI resumes on the next task); a terminal entry gets **Reopen** (new shell, same folder, no transcript restore); **Clear history** empties both fields for that room. Backend tests cover round-tripping, bounds, and that transcript/task-text-shaped or unknown fields are dropped rather than persisted. `tests/smoke.cjs` covers real-PTY close→ended-history→Reopen and the quit-while-running fallback across a real restart; `tests/managed-ui-smoke.cjs` covers close→ended-history→**Resume** end to end with a synthetic engine session (never a real provider call), including the opaque `providerSessionId` round-tripping through persisted state.
-- [ ] Provider discovery beyond the Claude/Codex/Cursor/shell allowlist. Cursor backend support is done; its UI picker entry is pending.
+- [x] Resizable columns: 1/2/3/`Auto` layouts, drag + keyboard resize, minimum column width,
+      `Auto` balances rows instead of leaving 3+1 gaps (2026-09-22 fix).
+- [x] Provider usage display, safe Markdown rendering, delegation-aware Room Activity feed that
+      pins to newest and never truncates.
+- [x] Configurable keyboard shortcuts: 20 rebindable Cmd-based actions in a Settings dialog
+      (`⌘,`), conflict refusal, reset to defaults; terminal input keeps plain keys and Ctrl-combos
+      untouched; explicit app menu with no default Cmd-W window close.
+- [x] Focus mode (`⌘⇧F`): hides sidebar/header chrome, tiles all of a room's sessions.
+- [x] "Add multiple…": launch N sessions per provider at once, unique auto-numbered names, bounded
+      by room and app session limits.
+
+## Done — recovery
+
+- [x] Per-room `sessionHistory` (cap 50) and `activityHistory` (cap 200) metadata, sanitized and
+      bounded at the `rooms:save-state` IPC boundary regardless of what the renderer sends; never
+      terminal output, agent transcripts, or task text.
+- [x] On restart every prior session renders as `ended`. A managed session with a stored provider
+      session id gets **Resume** (the provider's own CLI resumes via `providerSessionId`, validated
+      as an opaque non-credential string). A terminal session gets **Reopen** (new shell, same
+      folder, no transcript restore). Per-room **Clear history**.
+- [x] `rooms:save-state` writes atomically (temp file + rename).
+
+## Done — packaging, rename and license
+
+- [x] Renamed the product to **Alfred**; license set to **Apache-2.0** (owner decision, 2026-09-22).
+      Branding, `package.json` metadata, docs, and bridge/plugin tool ids all updated. `userData`
+      migration copies saved rooms from the old `agent-rooms` directory on first launch.
+- [x] GitHub remote `roybs2/alfred` created; kept **private** until the owner approves a release.
+- [x] electron-builder packaging: unsigned `.dmg` + `.zip` for `arm64` and `x64`; `postdist:mac`
+      rebuilds `node-pty` for the host Electron ABI after cross-arch packaging. `asarUnpack` covers
+      `node-pty` and the room MCP bridge + its deps so both run from the packaged `app.asar`.
+      Packaged `arm64` app verified directly (PTY works, bridge starts, DMGs mount); `x64` build
+      produced but not launched on real Intel/Rosetta hardware. See `doc/release.md`.
+
+## Verified live (pointers into doc/adapters.md)
+
+- Claude: bridge init/status, session id + resume, headless `room_send` delivery, permission-denial
+  behavior under default vs. `auto` mode — [Live verification 2026-09-22](adapters.md).
+- Cursor: PTY detection, managed turn + resume, bridge via temp plugin dir, `room_send` as a target,
+  own `room_send`/`shell` denied under default permission mode — [Cursor CLI live verification
+  2026-09-22](adapters.md#cursor-cli-live-verification-2026-09-22).
+- Cross-provider UI demo (Claude → Cursor, 3 runs) —
+  [Live UI demo 2026-09-22](adapters.md#live-ui-demo-2026-09-22).
+- Final end-to-end build (2 Claude + 2 Cursor, 3 `room_send` delegations, working site) —
+  [Final end-to-end test 2026-09-22](adapters.md#final-end-to-end-test-2026-09-22).
+- Codex: required-bridge startup/abort, JSONL event parsing, cancellation (SIGTERM) — same live
+  verification section in adapters.md. Full turn not yet verified (see Pending).
+- Packaged-app checks (PTY, bridge startup, provider allowlist, DMG mount) — `doc/release.md`
+  "Packaged-app testing".
+
+## Pending
+
+- [ ] Live-verify a successful Codex turn, `codex exec resume`, and a Codex-initiated `room_send`,
+      once the CLI is upgraded past the current model/usage-limit block.
+- [ ] Live-confirm that the "Pre-approve room tools" flags actually suppress permission denials
+      (Claude `--allowedTools`, Codex `approval_mode`) — only config parsing is unit-verified today.
+- [ ] Live-verify `room_spawn` against real providers (currently unit-tested only).
+- [ ] Live-verify busy-session queueing/duplicate-suppression and cancellation of a delegated call
+      against real providers.
+- [ ] Concurrent `room_send` fan-out from a single Claude turn is not available: Claude Code runs
+      MCP tools that are not marked `readOnlyHint` one at a time, so a turn with multiple
+      delegations sends them sequentially. This is a Claude Code limitation, not an Alfred one;
+      Alfred's engine supports concurrent calls, but it has not been exercised live. Do not mark
+      this done without a live multi-agent-in-parallel run.
+- [ ] Render Markdown links (currently agent output text renders safely but link syntax is not
+      turned into clickable links).
+- [ ] Signed/notarized installer, auto-update wiring, and clean-machine installation checks (the
+      current build is unsigned; see "Known limitations" in `doc/release.md`).
+- [ ] Homebrew cask for `brew install --cask alfred` (referenced in the final e2e demo site and the
+      README install instructions, not yet created).
+- [ ] Define supported macOS versions and Intel/Apple Silicon release coverage explicitly (x64 is
+      packaged but untested on real hardware).
 - [ ] More accessibility and keyboard navigation checks.
-- [ ] Define supported macOS versions and Intel/Apple Silicon release coverage.
-- [ ] Signed/notarized installer, updates and clean-machine installation checks.
-- [x] Name is Alfred; license Apache-2.0 (owner decision, 2026-09-22). No public repository or release has been published; publishing still needs explicit owner approval.
-
-## Post-MVP (owner requests, 2026-09-22)
-
-- [x] Keyboard shortcuts, configurable in a Settings view (2026-09-22). All 20 requested actions (new room, add session, close focused session, next/prev session, focus session 1–9, next/prev room, toggle focus mode, toggle Room Activity panel, open settings, focus task input) have mac defaults in `src/App.tsx` (`DEFAULT_SHORTCUTS`, combos keyed by `KeyboardEvent.code` so a Shift-transformed symbol like `Shift+]` → `}` can never desync a binding). A single capture-phase `keydown` listener dispatches by reading the live binding map through a ref. Settings view (`SettingsPanel`, opened by ⌘, or the header gear button): lists every action with its current binding, "Change" captures the next combo, refuses duplicates and combos missing ⌘ inline, "Reset to defaults"; focus-trapped (`useFocusTrap`), `role="dialog"` + `aria-modal` + `aria-labelledby`, Esc closes. Terminal-input safety: while a terminal has DOM focus (`.terminal-host`/`.xterm-helper-textarea`), only combos containing Meta are ever handled — plain keys and Ctrl-combos (Ctrl-C, etc.) always reach the shell untouched; a fixed reserved set (⌘C/⌘V/⌘A/⌘Z/⇧⌘Z/⌘Q/⌘H/⌘M) can never be bound or swallowed anywhere. `desktop/main.cjs` now builds an explicit, minimal application `Menu` (Quit/Hide/Minimize/Undo/Redo/Cut/Copy/Paste/Select All only) with **no** Close/⌘W item — Electron's own default menu (used whenever no menu is set) binds ⌘W to closing the window, which would otherwise double-handle the renderer's "close session" shortcut. Bindings persist as a global, non-per-room `settings.shortcuts` (sibling of `rooms`), sanitized at the `rooms:save-state` boundary (`sanitizeShortcuts`/`sanitizeSettings` in `desktop/main.cjs`: only known action ids, only combo strings matching a bounded pattern). Backend tests cover the menu (no Cmd+W anywhere in the built template) and settings sanitization (unknown action ids, malformed/oversized combos, and unknown top-level settings keys are all dropped). `tests/smoke.cjs` covers, against a real shell: rebinding "New room", conflict refusal, persistence across a real restart, a Meta-combo shortcut working while a terminal has focus, and plain keys/Ctrl-C reaching the shell untouched.
-- [x] Focus mode and Add multiple (2026-09-22). Focus mode (⌘⇧F or the workspace-header button; Esc or the toggle exits) hides the sidebar and Room Activity panel and slims the header via CSS only (`.app-shell.focus-mode`) — no state is lost, everything stays mounted underneath — and always tiles the room's sessions with the existing responsive Auto grid regardless of the room's saved column count (never mutates that setting). ⌘⇧A independently toggles just the Room Activity panel. "Add multiple…" (in the Add session menu) is a focus-trapped, labelled dialog (`AddMultipleDialog`) to choose a count per provider (Terminal, plus one managed-agent row per known provider) and launch them all at once; pre-validates against the room's `maxAgents` policy and the app-wide terminal cap (`MAX_SESSIONS`, 12) with clear inline errors before launching anything, both re-enforced server-side regardless. Every launched session gets a unique auto-numbered name (e.g. "Terminal 1", "Terminal 2") computed up front from one snapshot (`launchMultiple` in `src/App.tsx`), not recomputed mid-batch, since sequential creation calls race the render cycle. `tests/managed-ui-smoke.cjs` covers, with real terminal sessions (never billable agent work): Add multiple launching N unique-named sessions, focus mode hiding the sidebar/activity panel and tiling ~6 sessions with no pane overlap, Esc exiting, and the independent Room Activity toggle. Screenshots: `final-settings.png`, `final-add-multiple.png`, `final-focus-mode.png` (6 tiled terminal sessions).
-- [x] Final end-to-end test (2026-09-22, verified live). 2 Claude and 2 Cursor managed agents, set up through Add multiple and inline renames, built a small Alfred one-page site in a scratch room outside the repo using `room_send`. Three verified delegations, all completed. The site works: the copy-to-clipboard button was checked in Chromium. Four renderer bugs found in the run are fixed with managed smoke coverage: nested lists and `<ol start>` numbering, `_` emphasis inside identifiers, whitespace chunks dropped from Room Activity summaries, and 3 + 1 orphan rows in Auto layout. Findings recorded in adapters.md: managed Claude loads the user's global CLAUDE.md, which led it to commit in the room repo, and Claude Code runs parallel `room_send` calls one at a time.
-- [ ] Concurrent `room_send` fan-out from a single Claude turn is not available, because Claude Code runs MCP tools that are not marked read-only one at a time. Engine-side concurrency is covered only by unit tests.
+- [ ] GitHub Release v0.1.0 and making the repository public — owner-approved to happen after the
+      Codex live-verification check above.
 
 ## Verification commands
 
-`npm test` — isolated backend tests.
+`npm test` — isolated backend tests (45/45 passing as of 2026-09-23).
 
-`npm run build` — TypeScript and production assets. One nonblocking bundle-size advisory remains.
+`npm run build` — TypeScript and production assets.
 
-`npm run test:smoke` — real Electron + local shell, isolated temporary app state; never launches billable agent work. Rewrites the workspace screenshot.
+`npm run test:smoke` / `npm run test:smoke:managed` — real Electron + local shell, isolated
+temporary app state; never launches billable agent work.
 
 `npm run dev` — interactive development app.
+
+`npm run dist:mac` — packaged unsigned macOS `.dmg`/`.zip` (see `doc/release.md`).

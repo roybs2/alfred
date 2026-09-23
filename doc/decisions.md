@@ -98,5 +98,7 @@ Found in the final end-to-end test: with four managed panes at a width that fits
 
 ## Open questions
 
-- Which officially documented Claude Code and Codex interfaces, if any, provide stable structured session or delegation control?
-- Which macOS versions and distribution channel will be supported first?
+- Which macOS versions (minimum version, Intel vs Apple Silicon test coverage) are supported? Builds exist for both architectures; only Apple Silicon has been run.
+- Signing/notarization and a Homebrew cask after the first unsigned release?
+
+Resolved (2026-09-23): structured control uses each provider's documented headless mode — `claude -p` stream-json, `codex exec --json`, `cursor-agent -p` stream-json — with per-process MCP config (see [native-integration.md](native-integration.md)). First distribution channel is an unsigned GitHub Release (dmg + zip, arm64 and x64), owner-approved.

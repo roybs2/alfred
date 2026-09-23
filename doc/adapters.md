@@ -1,5 +1,16 @@
 # Agent adapters and delegation
 
+> **Status note (2026-09-23):** the sections below through "Locally observed CLI control paths" are
+> the original MVP-era design notes and read-only research from before structured adapters existed;
+> they are kept as an accurate historical record and are superseded by what shipped. Structured
+> delegation adapters (`room_send`/`room_spawn` over a per-room MCP bridge) are implemented for
+> Claude Code, Codex, and Cursor CLI — see `doc/native-integration.md` for the design and
+> `doc/architecture.md`'s "Current implementation and limits" for the as-built process/data model.
+> The dated live-verification sections further below in this file (from "Live verification
+> 2026-09-22" onward) are the evidence that those adapters actually work, including a real
+> cross-provider multi-agent build. See `doc/tasks.md` for current status and what remains pending
+> (notably a full live Codex turn).
+
 ## Why this boundary matters
 
 Starting a provider's CLI in a PTY is not the same as integrating its agent protocol. It gives Alfred a local terminal session, but does not by itself expose structured task creation, internal state, tool events, cancellation, or delegation. The UI and documentation must keep those capabilities separate.
