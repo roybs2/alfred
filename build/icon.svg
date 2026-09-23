@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="35%" cy="15%" r="90%">
+      <stop offset="0%" stop-color="#1c1925"/>
+      <stop offset="55%" stop-color="#141419"/>
+      <stop offset="100%" stop-color="#111115"/>
+    </radialGradient>
+    <linearGradient id="lav" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c2afff"/>
+      <stop offset="100%" stop-color="#8f72e0"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect x="24" y="24" width="976" height="976" rx="204" fill="none" stroke="#2c2a35" stroke-width="4"/>
+
+  <!-- bow tie -->
+  <g filter="url(#glow)">
+    <path d="M 300 392 L 492 472 L 492 552 L 300 632 C 274 642 256 622 256 596 L 256 428 C 256 402 274 382 300 392 Z" fill="url(#lav)"/>
+    <path d="M 724 392 L 532 472 L 532 552 L 724 632 C 750 642 768 622 768 596 L 768 428 C 768 402 750 382 724 392 Z" fill="url(#lav)"/>
+    <circle cx="512" cy="512" r="46" fill="#0f0e13"/>
+    <circle cx="512" cy="512" r="46" fill="none" stroke="url(#lav)" stroke-width="10"/>
+  </g>
+</svg>
