@@ -34,6 +34,15 @@ Rooms have a `preapproveRoomTools` policy flag. It is off by default, shown as "
 
 The runner always restricts Codex's bridge exposure with `enabled_tools`, so `room_spawn` is only exposed when the room allows it. It never changes the permission mode, sandbox, approval policy, or any other tool's permission, and it never passes bypass flags. Live confirmation of the flags is still pending (see adapters.md).
 
+### Cursor CLI: bridge via temporary plugin dir, no trust or approval shortcuts
+
+Decided 2026-09-22 after reading Cursor CLI 2026.09.18-9a7762b help and docs and running live tests (see adapters.md).
+- **MCP config.** Cursor documents MCP config only in `.cursor/mcp.json` (project) and `~/.cursor/mcp.json` (global); neither is written. The runner uses the documented `--plugin-dir <path>` flag with a private temporary plugin (`.cursor-plugin/plugin.json` + `mcp.json`, owner-only permissions) that defines only this task's room bridge. The directory holds the per-task bridge token and is removed when the process exits. Its basename and server key are fixed (`agent-rooms`/`agent_rooms`), so Cursor's tool id `plugin-agent-rooms-agent_rooms-room_send` stays stable across resumes. The bridge registers `room_spawn` only when the room allows spawning (`AGENT_ROOMS_TOOLS`), because Cursor has no per-process tool filter.
+- **Pre-approval.** Not applied for Cursor. Its per-tool allow syntax `Mcp(server:tool)` exists only in `~/.cursor/cli-config.json` or `<project>/.cursor/cli.json`. `--approve-mcps` approves every configured MCP server, and `--force`/`--yolo` run everything, so none of these is used. In print mode under the default permission mode, the room tools are therefore auto-rejected. This is reported as a `permission-denied` event. A user may add their own allow rule, which is unverified.
+- **Workspace trust.** Print mode refuses an untrusted folder. The runner never passes `--trust`; it reports "open a Cursor terminal session in this room and answer its trust prompt". The live harness passed `--trust` only for its throwaway scratch directory.
+- **Prompt input.** No stdin prompt input is documented, so the prompt is one argv element after `--` (no shell). It is visible to local process listings for the life of the turn.
+- **Bridge check.** Cursor's `system/init` reports no MCP status, so unlike Claude and Codex a failed bridge cannot be detected before the model turn.
+
 ### License remains open
 
 The project is intended to be open source, but the owner has not selected a license. Do not invent one or add a license file without that decision.

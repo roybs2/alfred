@@ -1,6 +1,8 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -8,6 +10,51 @@ const MAX_ERROR_BYTES = 1024 * 1024;
 const MAX_DISPLAY_TEXT = 256 * 1024;
 
 const DEFAULT_TOOL_TIMEOUT_SEC = 30 * 60;
+const MAX_DENIAL_REASON = 200;
+
+// Tool name plus a short provider reason. Never tool input: it can carry task text or context.
+function denialText(tool, reason) {
+  const name = typeof tool === 'string' && tool ? tool.slice(0, 120) : 'unknown tool';
+  const short = typeof reason === 'string' && reason ? reason.replace(/\s+/g, ' ').trim().slice(0, MAX_DENIAL_REASON) : 'permission denied';
+  return `${name}: ${short}`;
+}
+
+// Cursor CLI has no per-process MCP config flag; `--plugin-dir` loads a local plugin whose mcp.json can define
+// servers. Write that plugin into a private temporary directory (never the project or ~/.cursor) and remove it
+// when the process ends. Cursor names plugin tools `plugin-<plugin dir basename>-<server>-<tool>` (observed), so
+// both names are fixed: a resumed chat sees the same tool names, and a user-owned allow rule can name them.
+const CURSOR_PLUGIN_DIR = 'agent-rooms';
+const CURSOR_SERVER = 'agent_rooms';
+function writeCursorPlugin(tempRoot, server) {
+  const parent = fs.mkdtempSync(path.join(tempRoot, 'agent-rooms-cursor-'));
+  const dir = path.join(parent, CURSOR_PLUGIN_DIR);
+  fs.mkdirSync(path.join(dir, '.cursor-plugin'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, '.cursor-plugin', 'plugin.json'), JSON.stringify({ name: 'agent-rooms', version: '0.1.0' }), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { [CURSOR_SERVER]: server } }), { mode: 0o600 });
+  return { parent, dir };
+}
+
+// Cursor stream-json tool calls (observed): `tool_call.started` carries `{ <kind>ToolCall: { args: { toolName } } }`;
+// the matching `tool_call.completed` (same call_id) carries only `{ <kind>ToolCall: { result: { rejected: { reason } } } }`
+// when the user's permission mode does not allow the tool.
+function cursorToolName(toolCall) {
+  if (!toolCall || typeof toolCall !== 'object') return null;
+  for (const [kind, value] of Object.entries(toolCall)) {
+    if (!kind.endsWith('ToolCall')) continue;
+    if (typeof value?.args?.toolName === 'string' && value.args.toolName) return value.args.toolName;
+    return kind.replace(/ToolCall$/, '');
+  }
+  return null;
+}
+function cursorRejection(toolCall) {
+  if (!toolCall || typeof toolCall !== 'object') return null;
+  for (const [kind, value] of Object.entries(toolCall)) {
+    const rejected = value?.result?.rejected;
+    if (!kind.endsWith('ToolCall') || !rejected || typeof rejected !== 'object') continue;
+    return { tool: cursorToolName(toolCall), reason: typeof rejected.reason === 'string' ? rejected.reason : 'rejected' };
+  }
+  return null;
+}
 
 // Codex wraps upstream API errors as a JSON string inside `message`; surface the readable inner message.
 function providerMessage(value, fallback) {
@@ -20,26 +67,35 @@ function providerMessage(value, fallback) {
   return value;
 }
 
-function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = process.execPath, environmentFor, toolTimeoutSec = DEFAULT_TOOL_TIMEOUT_SEC } = {}) {
+function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = process.execPath, environmentFor, toolTimeoutSec = DEFAULT_TOOL_TIMEOUT_SEC, tempRoot = os.tmpdir() } = {}) {
   if (typeof executableFor !== 'function') throw new TypeError('executableFor required');
   return {
-    run({ provider, cwd, text, providerSessionId, signal, bridge, onOutput, roomTools = {} }) {
+    run({ provider, cwd, text, providerSessionId, signal, bridge, onOutput, onPermissionDenied = () => {}, roomTools = {} }) {
       const executable = executableFor(provider);
       if (!executable) throw new Error(`${provider} CLI is not installed`);
       if (!bridge) throw new Error('Room MCP bridge unavailable');
       const bridgeName = `agent_rooms_${bridge.sessionId.replaceAll('-', '_')}`;
       const bridgeScript = path.join(__dirname, 'room-mcp-bridge.mjs');
+      // Only this room's own bridge tools, and room_spawn only when the room allows spawning.
+      const roomToolNames = roomTools.allowSpawn === true ? ['room_send', 'room_spawn'] : ['room_send'];
       const bridgeEnv = {
         ELECTRON_RUN_AS_NODE: '1',
         AGENT_ROOMS_BRIDGE_PORT: String(bridge.port),
         AGENT_ROOMS_BRIDGE_TOKEN: bridge.token,
         AGENT_ROOMS_PEERS: JSON.stringify(bridge.peers),
+        // The bridge registers only these tools, so providers without a per-tool filter never see room_spawn
+        // unless the room allows it. The broker enforces the policy regardless.
+        AGENT_ROOMS_TOOLS: roomToolNames.join(','),
       };
       const tomlTable = (values) => `{${Object.entries(values).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(',')}}`;
-      // Only this room's own bridge tools, and room_spawn only when the room allows spawning.
-      const roomToolNames = roomTools.allowSpawn === true ? ['room_send', 'room_spawn'] : ['room_send'];
       const preapprove = roomTools.preapprove === true;
       let args;
+      let pluginDir;
+      const removePlugin = () => {
+        if (!pluginDir) return;
+        try { fs.rmSync(pluginDir, { recursive: true, force: true }); } catch {}
+        pluginDir = undefined;
+      };
       if (provider === 'claude') {
         const config = { mcpServers: { [bridgeName]: {
           command: bridgeExecutable,
@@ -67,10 +123,20 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
         args = ['exec', ...(providerSessionId ? ['resume'] : []), '--json',
           ...overrides.flatMap((value) => ['-c', value]),
           ...(providerSessionId ? [providerSessionId] : []), '-'];
+      } else if (provider === 'cursor') {
+        // Print mode without --force: file changes are proposed, not applied, and the user's Cursor permission
+        // config still governs tools. No documented per-process per-tool allow rule exists, so room-tool
+        // pre-approval is not applied for Cursor; --approve-mcps would approve every configured server.
+        // The prompt is argv after `--` (no documented stdin prompt input); spawn uses no shell.
+        const plugin = writeCursorPlugin(tempRoot, { command: bridgeExecutable, args: [bridgeScript], env: bridgeEnv });
+        pluginDir = plugin.parent;
+        args = ['-p', '--output-format', 'stream-json', '--stream-partial-output', '--plugin-dir', plugin.dir,
+          ...(providerSessionId ? ['--resume', providerSessionId] : []), '--', text];
       } else throw new TypeError('Invalid provider');
       return new Promise((resolve, reject) => {
         // Never start a provider process for a task that was already cancelled.
         if (signal?.aborted) {
+          removePlugin();
           reject(signal.reason instanceof Error ? signal.reason : new Error('Agent task cancelled'));
           return;
         }
@@ -79,7 +145,7 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
           child = spawnProcess(executable, args, {
             cwd, env: environmentFor ? environmentFor(executable) : { ...process.env }, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
           });
-        } catch (error) { reject(error); return; }
+        } catch (error) { removePlugin(); reject(error); return; }
         let stdoutBytes = 0;
         let stderrBytes = 0;
         let buffer = '';
@@ -90,6 +156,14 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
         let providerError;
         let turnCompleted = false;
         let settled = false;
+        const denied = new Set();
+        const cursorTools = new Map();
+        const deny = (id, tool, reason) => {
+          const key = id || tool;
+          if (key && denied.has(key)) return;
+          if (key) denied.add(key);
+          try { onPermissionDenied(denialText(tool, reason)); } catch {}
+        };
         let killTimer;
         const fail = (error) => {
           if (settled) return;
@@ -103,6 +177,8 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
         const cleanup = () => {
           signal?.removeEventListener('abort', abort);
         };
+        // The plugin dir (with this task's bridge token) must outlive the process, so remove it only on exit.
+        child.on('close', removePlugin);
         const abort = () => {
           fail(signal.reason instanceof Error ? signal.reason : new Error('Agent task cancelled'));
         };
@@ -132,8 +208,31 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
               if (delta.length > MAX_DISPLAY_TEXT) providerError = new Error('Provider text chunk exceeded display limit');
               else { streamedText = true; onOutput(delta); }
             }
+            if (item.type === 'system' && item.subtype === 'permission_denied') deny(item.tool_use_id, item.tool_name, item.message);
+            if (item.type === 'result' && Array.isArray(item.permission_denials))
+              for (const d of item.permission_denials) deny(d?.tool_use_id, d?.tool_name);
             if (item.type === 'result') {
               if (item.is_error) providerError = new Error(typeof item.result === 'string' ? item.result : 'Claude task failed');
+              if (typeof item.result === 'string') finalText = item.result;
+            }
+          } else if (provider === 'cursor') {
+            if (typeof item.session_id === 'string' && item.session_id) sessionId = item.session_id;
+            // With --stream-partial-output, deltas carry timestamp_ms; the buffered flush before a tool call
+            // (model_call_id) and the final complete assistant message repeat already-streamed text.
+            if (item.type === 'assistant' && typeof item.timestamp_ms === 'number' && item.model_call_id === undefined) {
+              const delta = (item.message?.content || []).filter((c) => c?.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('');
+              if (delta.length > MAX_DISPLAY_TEXT) providerError = new Error('Provider text chunk exceeded display limit');
+              else if (delta) { streamedText = true; onOutput(delta); }
+            }
+            if (item.type === 'tool_call' && item.subtype === 'started' && typeof item.call_id === 'string' && cursorTools.size < 256)
+              cursorTools.set(item.call_id, cursorToolName(item.tool_call));
+            if (item.type === 'tool_call' && item.subtype === 'completed') {
+              const rejection = cursorRejection(item.tool_call);
+              if (rejection) deny(item.call_id, (typeof item.call_id === 'string' && cursorTools.get(item.call_id)) || rejection.tool, rejection.reason);
+              cursorTools.delete(item.call_id);
+            }
+            if (item.type === 'result') {
+              if (item.is_error) providerError = new Error(typeof item.result === 'string' && item.result ? item.result : 'Cursor task failed');
               if (typeof item.result === 'string') finalText = item.result;
             }
           } else {
@@ -168,11 +267,16 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
             reject(new Error('Room MCP bridge failed to initialize'));
             return;
           }
+          // Workspace trust is the user's decision; never pass --trust/--force on their behalf.
+          if (provider === 'cursor' && code !== 0 && stderr.includes('Workspace Trust Required')) {
+            reject(new Error('Cursor has not trusted this folder yet. Open a Cursor terminal session in this room and answer its workspace trust prompt, then retry.'));
+            return;
+          }
           if (code !== 0) { reject(new Error(`${provider} exited ${sig || code}: ${stderr.slice(-1200)}`)); return; }
           if (provider === 'codex' && !turnCompleted) { reject(new Error('Codex turn did not complete')); return; }
           if (!sessionId || typeof finalText !== 'string') { reject(new Error(`${provider} did not return a complete structured result`)); return; }
           if (finalText.length > MAX_DISPLAY_TEXT) { reject(new Error('Provider final text exceeded display limit')); return; }
-          if (provider === 'claude' && !streamedText && finalText) onOutput(finalText);
+          if ((provider === 'claude' || provider === 'cursor') && !streamedText && finalText) onOutput(finalText);
           resolve({ text: finalText, providerSessionId: sessionId });
         });
         child.stdin.on('error', (error) => fail(error));
@@ -182,4 +286,4 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
   };
 }
 
-module.exports = { cliRunner, providerMessage };
+module.exports = { cliRunner, providerMessage, denialText };

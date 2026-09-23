@@ -662,6 +662,7 @@ button {
   gap: 8px;
   padding: 0 10px;
   background: #19181e;
+  flex-wrap: nowrap;
 }
 .terminal-head .provider-mark {
   height: 19px;
@@ -778,6 +779,17 @@ button {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+}
+.activity-panel h2,
+.activity-panel h3,
+.activity-panel p,
+.activity-panel span,
+.activity-panel label,
+.activity-panel div {
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 .activity-head {
   height: 74px;
@@ -1094,6 +1106,8 @@ button {
     7px 'DM Mono',
     monospace;
   letter-spacing: 0.4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .managed-card {
   min-height: 290px;
@@ -1221,4 +1235,186 @@ button {
     8px 'DM Mono',
     monospace;
   color: #66616c;
+}
+.provider-mark.cursor {
+  color: #8fd0c2;
+  background: #1f302c;
+}
+
+/* Inline rename */
+.pane-name {
+  font-size: 10px;
+  font-weight: 600;
+  color: #c7c2ce;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.pane-name-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 120px;
+  min-width: 56px;
+  max-width: 220px;
+}
+.pane-name-input,
+.session-name-input {
+  font:
+    10px 'DM Mono',
+    monospace;
+  background: #1c1b21;
+  border: 1px solid #72608f;
+  border-radius: 4px;
+  color: #e1dbe8;
+  padding: 3px 6px;
+  outline: none;
+  min-width: 0;
+  width: 100%;
+}
+/* The error is a floating tooltip under the field, not extra document flow,
+   so it never overlaps sibling header elements (like the MANAGED AGENT
+   badge) or changes the row/header height. */
+.rename-error {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: #2c1f22;
+  border: 1px solid #8a4a4a;
+  color: #e7a9a3;
+  font:
+    9px 'DM Mono',
+    monospace;
+  padding: 4px 7px;
+  border-radius: 4px;
+  white-space: normal;
+  max-width: 220px;
+  z-index: 30;
+  box-shadow: 0 4px 10px #0006;
+}
+.session-row-editing {
+  padding: 0 7px 0 16px;
+  height: 27px;
+}
+.session-row-editing .pane-name-wrap {
+  flex: 1;
+}
+
+/* Warning activity + transcript entries: permission denials, surfaced
+   visibly rather than silently swallowed. */
+.activity-item.warning .activity-symbol {
+  color: #e0a95e;
+}
+.activity-item.warning p {
+  color: #e6c9a0;
+}
+.transcript-entry.warning {
+  border-color: #d1a35a;
+}
+.transcript-entry.warning span {
+  color: #e0a95e;
+}
+.transcript-entry.delegation {
+  border-color: #7a8fc2;
+}
+.transcript-entry.delegation span {
+  color: #93a8e0;
+}
+
+/* Delegation view: only renders relationships an actual delegation event
+   proved, with each child task's live state taken from its own events. */
+.delegation-view {
+  border-top: 1px solid #2b2931;
+  padding: 12px 14px 4px;
+}
+.delegation-head h3 {
+  font:
+    600 12px 'Manrope',
+    sans-serif;
+  margin: 3px 0 8px;
+  color: #d8d1e4;
+}
+.delegation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.delegation-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.delegation-parent,
+.delegation-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 4px 4px;
+  border-radius: 5px;
+  font-size: 10px;
+  color: #c0bac6;
+}
+.delegation-parent:hover,
+.delegation-child:hover {
+  background: #201e25;
+  color: #d5cde0;
+}
+.delegation-child {
+  padding-left: 10px;
+  font-size: 9px;
+  color: #a49cae;
+}
+.delegation-name {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.delegation-state {
+  flex: 0 0 auto;
+  font:
+    8px 'DM Mono',
+    monospace;
+  letter-spacing: 0.4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #9d95a8;
+  background: #232028;
+}
+.delegation-state.delegated {
+  color: #a99ee0;
+  background: #26223a;
+}
+.delegation-state.started {
+  color: #baa5f8;
+  background: #2a2438;
+}
+.delegation-state.completed {
+  color: #8ac3a0;
+  background: #1f2c25;
+}
+.delegation-state.failed {
+  color: #dc9687;
+  background: #322523;
+}
+
+/* Visible keyboard focus rings */
+.session-row:focus-visible,
+.room-row:focus-visible,
+.delegation-parent:focus-visible,
+.delegation-child:focus-visible,
+.icon-button:focus-visible,
+.subtle-button:focus-visible,
+.paste-button:focus-visible,
+.add-session:focus-visible,
+.top-icon:focus-visible {
+  outline: 2px solid #9e82ce;
+  outline-offset: -2px;
 }

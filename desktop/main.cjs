@@ -68,10 +68,13 @@ function detectAgents() {
   );
   const claudePath = findExecutable(['claude'], locations);
   const codexPath = findExecutable(['codex'], locations);
+  // Cursor's installer also creates a generic `agent` alias; only the unambiguous `cursor-agent` name is trusted.
+  const cursorPath = findExecutable(['cursor-agent'], locations);
   return [
     { id: 'shell', name: 'Shell', available: !!shellPath, path: shellPath },
     { id: 'claude', name: 'Claude Code', available: !!claudePath, path: claudePath },
     { id: 'codex', name: 'Codex', available: !!codexPath, path: codexPath },
+    { id: 'cursor', name: 'Cursor CLI', available: !!cursorPath, path: cursorPath },
   ];
 }
 
@@ -155,7 +158,7 @@ handle('rooms:choose-directory', async () => {
   return result.canceled ? null : result.filePaths[0] || null;
 });
 handle('rooms:create-session', ({ id, provider, cwd, cols = 100, rows = 30 } = {}) => {
-  if (!['shell', 'claude', 'codex'].includes(provider)) throw new TypeError('Invalid provider');
+  if (!['shell', 'claude', 'codex', 'cursor'].includes(provider)) throw new TypeError('Invalid provider');
   if (id !== undefined) stringArg(id, 'session id', 80);
   if (sessions.size >= MAX_SESSIONS)
     throw new Error(`Maximum of ${MAX_SESSIONS} terminal sessions reached`);

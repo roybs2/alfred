@@ -34,7 +34,12 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 - [x] Fix: Claude runner aborts at init when the room bridge failed/missing (was letting a billable turn run); Codex runner surfaces inner API error text and maps required-bridge startup failure.
 - [x] Add explicit off-by-default "Pre-approve room tools" room policy (scoped Claude --allowedTools / Codex per-tool approval_mode; Codex enabled_tools limited to room tools). Unit and managed UI smoke tests.
 - [ ] Live-verify a successful Codex turn, `codex exec resume`, Codex-initiated room_send, and that pre-approval suppresses denials (blocked: configured Codex model needs newer CLI; account usage limit).
-- [ ] Surface provider permission denials as visible activity events.
+- [x] Surface provider permission denials: runner `onPermissionDenied` → engine event `{type:'permission-denied', sessionId, roomId, taskId, text}` (tool name + short provider reason, ≤300 chars, never tool input). Sources: Claude `system/permission_denied` + `result.permission_denials` (deduped by tool_use_id); Cursor `tool_call.completed…result.rejected` (live-verified 2026-09-22). Codex has no documented denial event, so none is emitted. Unit tested. UI rendering pending (renderer owner).
+- [x] Cursor CLI (2026.09.18-9a7762b) as a third provider (2026-09-22, evidence in adapters.md):
+  - PTY: detected as `cursor-agent` (not the generic `agent` alias), in the provider allowlist. The UI picker list in `src/App.tsx` is hardcoded and still needs a Cursor entry.
+  - Managed: `-p --output-format stream-json --stream-partial-output`, session id, and `--resume` verified live. The room bridge loads through a temporary `--plugin-dir` (never project or ~/.cursor files). Claude→Cursor `room_send` verified live.
+  - Room-tool approval: under Cursor's default permission mode the bridge tools are auto-rejected in print mode (verified live). No per-process per-tool allow exists, so the room's pre-approve policy has no effect for Cursor. Workspace trust is never passed; an untrusted folder fails with a clear message.
+- [ ] Cursor: live-verify a Cursor-initiated `room_send` that is allowed (needs a user-owned `Mcp(...)` allow rule), `room_spawn`, and cancellation.
 - [ ] Verify owned session identity, message delivery acknowledgement, busy-session behavior, delegated-call cancellation, and room_spawn against real providers.
 - [ ] Prove whether native subagent delegation can be redirected to another provider. Do not infer this from CLI launch or queue support.
 
@@ -53,7 +58,7 @@ Updated 2026-09-22. Milestone 1 (local terminal foundation) is implemented and t
 - [ ] Resizable split handles and pane layout controls.
 - [ ] Distinct names/roles for multiple sessions of the same provider.
 - [ ] Better recovery and persisted activity/session display history (no sensitive transcripts by default).
-- [ ] Provider discovery beyond the initial Claude/Codex/shell allowlist, including verified Cursor support.
+- [ ] Provider discovery beyond the Claude/Codex/Cursor/shell allowlist. Cursor backend support is done; its UI picker entry is pending.
 - [ ] More accessibility and keyboard navigation checks.
 - [ ] Define supported macOS versions and Intel/Apple Silicon release coverage.
 - [ ] Signed/notarized installer, updates and clean-machine installation checks.

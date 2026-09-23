@@ -408,3 +408,176 @@ test('room policy passes pre-approval to the runner only when the owner enables 
   await tick();
   engine.stopAll();
 });
+
+// Live Cursor CLI 2026.09.18-9a7762b stream-json shapes (see doc/adapters.md, Cursor live verification).
+const cursorLive = (sid) => [
+  { type: 'system', subtype: 'init', apiKeySource: 'login', cwd: '/a', session_id: sid, model: 'Auto', permissionMode: 'default' },
+  { type: 'user', message: { role: 'user', content: [] }, session_id: sid },
+  { type: 'thinking', subtype: 'delta', text: 'hmm', session_id: sid, timestamp_ms: 1 },
+  { type: 'thinking', subtype: 'completed', session_id: sid, timestamp_ms: 2 },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Calling' }] }, session_id: sid, timestamp_ms: 3 },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: ' tool.' }] }, session_id: sid, timestamp_ms: 4 },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Calling tool.' }] }, session_id: sid, model_call_id: 'm1', timestamp_ms: 5 },
+  { type: 'tool_call', subtype: 'started', call_id: 'c1', session_id: sid, tool_call: { mcpToolCall: { args: { name: 'plugin-agent-rooms-agent_rooms-room_send', args: { to: 'Nobody', task: 'secret task text' }, toolName: 'room_send' } } } },
+  { type: 'tool_call', subtype: 'completed', call_id: 'c1', session_id: sid, tool_call: { mcpToolCall: { result: { rejected: { reason: 'User rejected MCP: plugin-agent-rooms-agent_rooms-room_send', isReadonly: false } } } } },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'DONE' }] }, session_id: sid, timestamp_ms: 6 },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'DONE' }] }, session_id: sid },
+  { type: 'result', subtype: 'success', duration_ms: 7295, is_error: false, result: 'Calling tool.DONE', session_id: sid, request_id: 'r' },
+].map((e) => JSON.stringify(e)).join('\n') + '\n';
+
+test('cursor runner uses print stream-json, a temporary plugin for the bridge, and never trust/force/approve-all flags', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-rooms-test-'));
+  try {
+    const spawned = [];
+    const runner = cliRunner({ executableFor: () => '/bin/cursor-agent', spawnProcess: fakeSpawn(spawned), bridgeExecutable: '/bin/node', tempRoot });
+    const text = '--force starts like a flag\nand spans lines';
+    const first = runner.run({ provider: 'cursor', cwd: '/a', text, bridge: bridgeInfo, onOutput() {}, roomTools: { preapprove: true, allowSpawn: false } });
+    const { args, options, child } = spawned[0];
+    assert.deepEqual(args.slice(0, 5), ['-p', '--output-format', 'stream-json', '--stream-partial-output', '--plugin-dir']);
+    assert.deepEqual(args.slice(-2), ['--', text], 'prompt is a single argv element after --');
+    assert.equal(options.shell, false);
+    assert(!args.slice(0, -1).some((a) => /^(-f|--force|--yolo|--approve-mcps|--trust|--auto-review|--sandbox)$/.test(a)));
+    assert(!args.includes('--resume'));
+    const pluginDir = args[args.indexOf('--plugin-dir') + 1];
+    assert(pluginDir.startsWith(tempRoot) && path.basename(pluginDir) === 'agent-rooms');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(pluginDir, '.cursor-plugin', 'plugin.json'), 'utf8')).name, 'agent-rooms');
+    const server = JSON.parse(fs.readFileSync(path.join(pluginDir, 'mcp.json'), 'utf8')).mcpServers.agent_rooms;
+    assert.equal(server.command, '/bin/node');
+    assert.match(server.args[0], /room-mcp-bridge\.mjs$/);
+    assert.equal(server.env.AGENT_ROOMS_BRIDGE_TOKEN, 't');
+    assert.equal(server.env.AGENT_ROOMS_TOOLS, 'room_send', 'room_spawn hidden unless the room allows it');
+    assert.equal(fs.statSync(path.join(pluginDir, 'mcp.json')).mode & 0o077, 0, 'plugin config is owner-only');
+    child.stdout.end(cursorLive('chat-1'));
+    child.emit('close', 0, null);
+    assert.deepEqual(await first, { text: 'Calling tool.DONE', providerSessionId: 'chat-1' });
+    assert.equal(fs.existsSync(pluginDir), false, 'plugin dir with the bridge token is removed on exit');
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+
+    const second = runner.run({ provider: 'cursor', cwd: '/a', text: 'Hi', providerSessionId: 'chat-1', bridge: bridgeInfo, onOutput() {} });
+    const resumeArgs = spawned[1].args;
+    assert.equal(resumeArgs[resumeArgs.indexOf('--resume') + 1], 'chat-1');
+    assert(resumeArgs.indexOf('--resume') < resumeArgs.indexOf('--'));
+    assert.equal(path.basename(resumeArgs[resumeArgs.indexOf('--plugin-dir') + 1]), 'agent-rooms', 'stable tool names across resumes');
+    spawned[1].child.stdout.end(cursorLive('chat-1'));
+    spawned[1].child.emit('close', 0, null);
+    assert.equal((await second).providerSessionId, 'chat-1');
+  } finally { fs.rmSync(tempRoot, { recursive: true, force: true }); }
+});
+
+test('cursor runner streams only text deltas, reports rejected tools as denials, and maps trust and error results', async () => {
+  const spawned = [];
+  const output = [];
+  const denials = [];
+  const runner = cliRunner({ executableFor: () => '/bin/cursor-agent', spawnProcess: fakeSpawn(spawned) });
+  const run = runner.run({ provider: 'cursor', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput: (t) => output.push(t), onPermissionDenied: (t) => denials.push(t) });
+  spawned[0].child.stdout.end(cursorLive('chat-2'));
+  spawned[0].child.emit('close', 0, null);
+  await run;
+  assert.deepEqual(output, ['Calling', ' tool.', 'DONE'], 'no duplicate flush or final message');
+  assert.equal(denials.length, 1);
+  assert.equal(denials[0], 'room_send: User rejected MCP: plugin-agent-rooms-agent_rooms-room_send');
+  assert(!denials[0].includes('secret task text'), 'denials never include tool input');
+
+  const quiet = [];
+  const short = runner.run({ provider: 'cursor', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput: (t) => quiet.push(t) });
+  spawned[1].child.stdout.end([
+    { type: 'system', subtype: 'init', session_id: 'c3' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'OK' }] }, session_id: 'c3' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'OK', session_id: 'c3' },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  spawned[1].child.emit('close', 0, null);
+  assert.deepEqual(await short, { text: 'OK', providerSessionId: 'c3' });
+  assert.deepEqual(quiet, ['OK'], 'final result is shown when no deltas streamed');
+
+  const trust = runner.run({ provider: 'cursor', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput() {} });
+  spawned[2].child.stderr.write('\n⚠ Workspace Trust Required\n\n  Pass --trust, --yolo, or -f if you trust this directory\n');
+  await new Promise((resolve) => setImmediate(resolve));
+  spawned[2].child.stdout.end();
+  spawned[2].child.emit('close', 1, null);
+  await assert.rejects(trust, /has not trusted this folder.*Cursor terminal session/);
+
+  const failed = runner.run({ provider: 'cursor', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput() {} });
+  spawned[3].child.stdout.end(JSON.stringify({ type: 'result', subtype: 'error', is_error: true, result: 'Usage limit', session_id: 'c4' }) + '\n');
+  spawned[3].child.emit('close', 1, null);
+  await assert.rejects(failed, /Usage limit/);
+});
+
+test('claude permission denials are reported once per tool use with name and reason only (live 2.1.280 shape)', async () => {
+  const spawned = [];
+  const denials = [];
+  const runner = cliRunner({ executableFor: () => '/bin/claude', spawnProcess: fakeSpawn(spawned) });
+  const run = runner.run({ provider: 'claude', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput() {}, onPermissionDenied: (t) => denials.push(t) });
+  const tool = 'mcp__agent_rooms_aaaa_bbbb__room_send';
+  spawned[0].child.stdout.end([
+    { type: 'system', subtype: 'init', session_id: 's', mcp_servers: [{ name: 'agent_rooms_aaaa_bbbb', status: 'connected' }] },
+    { type: 'system', subtype: 'permission_denied', tool_name: tool, tool_use_id: 'toolu_1', message: `Claude requested permissions to use ${tool}, but you haven't granted it yet.`, session_id: 's' },
+    { type: 'result', subtype: 'success', is_error: false, session_id: 's', result: 'done',
+      permission_denials: [{ tool_name: tool, tool_use_id: 'toolu_1', tool_input: { task: 'secret' } }, { tool_name: 'Bash', tool_use_id: 'toolu_2', tool_input: { command: 'secret' } }] },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  spawned[0].child.emit('close', 0, null);
+  await run;
+  assert.deepEqual(denials, [
+    `${tool}: Claude requested permissions to use ${tool}, but you haven't granted it yet.`,
+    'Bash: permission denied',
+  ]);
+  assert(!denials.some((d) => d.includes('secret')));
+});
+
+test('engine emits permission-denied events for the running task only, bounded in size', async () => {
+  const { engine, calls, events, create } = setup();
+  const a = create('r', 'A', 'cursor');
+  assert.equal(engine.sessions.get(a.id).provider, 'cursor');
+  const { taskId } = engine.runTask({ sessionId: a.id, text: 'go' });
+  await tick();
+  calls[0].request.onPermissionDenied('room_send: ' + 'x'.repeat(1000));
+  calls[0].request.onPermissionDenied('');
+  const denial = events.filter((e) => e.type === 'permission-denied');
+  assert.equal(denial.length, 1);
+  assert.deepEqual({ ...denial[0], text: undefined }, { type: 'permission-denied', sessionId: a.id, roomId: 'r', taskId, text: undefined });
+  assert(denial[0].text.startsWith('room_send: x') && denial[0].text.length <= 300);
+  calls[0].resolve({ text: 'ok', providerSessionId: 'p' });
+  await tick();
+  calls[0].request.onPermissionDenied('late: after completion');
+  assert.equal(events.filter((e) => e.type === 'permission-denied').length, 1);
+  engine.stopAll();
+});
+
+test('engine accepts cursor sessions and room_spawn of cursor agents; default names use the provider label', async () => {
+  const { engine, calls, create } = setup();
+  engine.setRoomPolicy({ roomId: 'r', allowSpawn: true, maxAgents: 4 });
+  const unnamed = engine.createSession({ roomId: 'r', provider: 'cursor', cwd: '/a' });
+  assert.match(unnamed.name, /^Cursor [0-9a-f]{8}$/);
+  assert.throws(() => create('r', 'X', 'gemini'), /Invalid provider/);
+  const lead = create('r', 'Lead');
+  engine.runTask({ sessionId: lead.id, text: 'lead' });
+  await tick();
+  const pending = engine.toolCall(engine.sessions.get(lead.id), 'room_spawn', { provider: 'cursor', task: 'hi', name: 'Helper' });
+  await waitFor(() => calls.length === 2, 'spawned cursor task');
+  assert.equal(engine.getRoomSessions('r').find((s) => s.name === 'Helper').provider, 'cursor');
+  calls[1].resolve({ text: 'hi back', providerSessionId: 'c' });
+  assert.equal((await pending).text, 'hi back');
+  await assert.rejects(engine.toolCall(engine.sessions.get(lead.id), 'room_spawn', { provider: 'gemini', task: 'x' }), /Invalid provider/);
+  calls[0].resolve({ text: 'ok', providerSessionId: 'p' });
+  await tick();
+  engine.stopAll();
+});
+
+test('room bridge registers only the tools the runner enables', async () => {
+  const path = require('node:path');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const listFor = async (tools) => {
+    const env = { AGENT_ROOMS_BRIDGE_PORT: '9', AGENT_ROOMS_BRIDGE_TOKEN: 'x', AGENT_ROOMS_PEERS: '[]', PATH: process.env.PATH };
+    if (tools !== undefined) env.AGENT_ROOMS_TOOLS = tools;
+    const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(__dirname, '..', 'desktop', 'room-mcp-bridge.mjs')], env });
+    const client = new Client({ name: 'test', version: '0' });
+    await client.connect(transport);
+    try { return (await client.listTools()).tools.map((t) => t.name).sort(); } finally { await client.close(); }
+  };
+  assert.deepEqual(await listFor('room_send'), ['room_send']);
+  assert.deepEqual(await listFor('room_send,room_spawn'), ['room_send', 'room_spawn']);
+  assert.deepEqual(await listFor(undefined), ['room_send', 'room_spawn']);
+});

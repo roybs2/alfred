@@ -117,6 +117,26 @@ test('IPC rejects foreign senders and subframes', async () => {
   }
 });
 
+test('detection lists Cursor CLI alongside Claude and Codex, and cursor passes the PTY provider allowlist', async () => {
+  const h = backendHarness();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const agents = h.invoke('rooms:detect-agents');
+    assert.equal(agents.map((agent) => agent.id).join(','), 'shell,claude,codex,cursor');
+    const cursor = agents.find((agent) => agent.id === 'cursor');
+    assert.equal(cursor.name, 'Cursor CLI');
+    assert.equal(cursor.available, !!cursor.path);
+    if (cursor.path) assert.equal(path.basename(cursor.path), 'cursor-agent');
+    else
+      assert.throws(
+        () => h.invoke('rooms:create-session', { provider: 'cursor', cwd: os.tmpdir() }),
+        /cursor executable was not found/,
+      );
+  } finally {
+    fs.rmSync(h.userData, { recursive: true, force: true });
+  }
+});
+
 test('session validation rejects unknown providers and invalid working directories', async () => {
   const h = backendHarness();
   try {

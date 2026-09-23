@@ -86,5 +86,48 @@ This check used Codex. `stopSession` was called about 2.5 s after spawn, after `
   - Claude: `--allowedTools mcp__<bridge>__room_send[,room_spawn]`.
   - Codex: per-tool `approval_mode="approve"`. Only config parsing has been verified, via `codex mcp get --json`, which also rejects unknown variants.
   - Whether `codex exec` prompts, auto-denies, or auto-allows MCP tool calls without the override is still unknown.
-- Surfacing `permission_denials` / `system/permission_denied` as a visible activity event instead of only in the model's reply text.
+- ~~Surfacing `permission_denials` / `system/permission_denied` as a visible activity event.~~ Done: engine `permission-denied` event (see the Cursor section for the live check).
 - Delegated-call cancellation, busy-target queueing, and `room_spawn` against real providers.
+
+## Cursor CLI live verification 2026-09-22
+
+The owner authorized adding Cursor CLI and a small live test budget of at most 4 Cursor model turns with trivial prompts. Environment: `cursor-agent` 2026.09.18-9a7762b at `~/.local/bin/cursor-agent` (the installer also creates a generic `agent` alias, which detection ignores). Signed in with the user's Cursor login (`apiKeySource: "login"`). `model: "Auto"`, the user's default; no `--model` was passed. Node v26.3.0 ran the bridge. Each run used a fresh `git init`'d temporary room directory. The harness is the same scratch harness as above, driving the real `AgentEngine`, `BridgeBroker`, and `cliRunner`. No transcripts are stored here.
+
+### Read-only surface (help and official docs)
+
+- **Help.** `-p/--print` ("Has access to all tools, including write and shell"), `--output-format text|json|stream-json`, `--stream-partial-output`, `--resume [chatId]`, `--continue`, `create-chat`, `--mode plan|ask`, `--plugin-dir <path>`, `--approve-mcps` ("Automatically approve all MCP servers"), `--trust`, `-f/--force`/`--yolo`, `--auto-review`, `--sandbox`. `mcp` subcommands: `list`, `list-tools`, `login`, `enable`, `disable`. They read only `.cursor/mcp.json` and `~/.cursor/mcp.json`; `mcp list`/`list-tools` ignored `--plugin-dir`.
+- **Docs.**
+  - [Output format](https://cursor.com/docs/cli/reference/output-format): `system/init` with `session_id`, `model`, and `permissionMode`; then `user`, `assistant`, `tool_call` `started`/`completed`, and `result` with `result`, `is_error`, and `session_id`. With partial output, deltas carry `timestamp_ms`, and the flush before a tool call carries `model_call_id`.
+  - [Headless](https://cursor.com/docs/cli/headless): "Without --force, changes are only proposed, not applied".
+  - [Permissions](https://cursor.com/docs/cli/reference/permissions): `Mcp(server:tool)` rules live in `~/.cursor/cli-config.json` or `<project>/.cursor/cli.json`.
+  - [MCP](https://cursor.com/docs/context/mcp): "Cursor asks for approval before using MCP tools by default".
+  - [Plugins](https://cursor.com/docs/plugins) and [plugin reference](https://cursor.com/docs/reference/plugins): `.cursor-plugin/plugin.json` (with `name`) plus a root `mcp.json` with `mcpServers`.
+
+### Observed
+
+- **Workspace trust.** Without trust, print mode exits 1 in about 0.3 s, before any model request, with "Workspace Trust Required … Pass --trust, --yolo, or -f". The runner maps this to a clear message and never passes those flags. The harness passed `--trust` only for its scratch directories. This was a harness-only change, like the earlier `--permission-mode` diagnostic.
+- **Single turn (turn 1).** `-p --output-format stream-json --stream-partial-output --plugin-dir <tmp>/agent-rooms -- <prompt>`.
+  - Events: `system/init` (keys `apiKeySource, cwd, session_id, model, permissionMode`; `permissionMode: "default"`; no MCP status field), `user`, `thinking` `delta`/`completed` (ignored), an `assistant` delta, the final full `assistant` message (no `timestamp_ms`), `result/success` (`duration_ms` 3034, `usage`).
+  - The task completed with `OK` in about 10.5 s wall time, with session id `1d2e7ebc-…`.
+- **Bridge loaded through `--plugin-dir`.** At `system/init`, `ps` showed `node …/desktop/room-mcp-bridge.mjs` as a child of `cursor-agent`. The tool was exposed as `plugin-<plugin dir basename>-<server key>-room_send`. After the change to a fixed basename, the id became `plugin-agent-rooms-agent_rooms-room_send` (server `plugin-agent-rooms-agent_rooms`). Loading the plugin may depend on a Cursor-side feature gate (`enableUserLocalPlugins`) and has not been verified on other accounts or versions. Nothing was written to the project or to `~/.cursor`, and the temporary plugin directories were gone after each run.
+- **Resume (turn 2).** The same argv plus `--resume 1d2e7ebc-…` kept the same `session_id` in init and result.
+  - In this resumed chat, the model called the tool under the first turn's randomly named plugin id. That led to the fixed plugin naming.
+  - The result text concatenates all assistant segments, including the pre-tool preamble (`"…DONE.DONE"`). The runner passes it through unchanged.
+- **Approval (turns 2 and 4).** A Cursor-initiated `room_send` under `permissionMode: "default"` was auto-rejected about 130–180 ms after `tool_call.started`, before reaching the bridge.
+  - Observed shapes: `tool_call.started` carries `{mcpToolCall:{args:{toolName:"room_send", providerIdentifier, skipApproval:false, …}}}`; `tool_call.completed` (same `call_id`) carries only `{mcpToolCall:{result:{rejected:{reason:"User rejected MCP: plugin-agent-rooms-agent_rooms-room_send"}}}}`.
+  - In turn 4, the engine emitted `{type:"permission-denied", …, text:"mcp: User rejected MCP: …"}`. The tool name came out as `mcp` because the completed event has no `args`. The runner now keys the tool name by `call_id` from `started`. Replaying that raw stream through the fixed runner produced `room_send: User rejected MCP: plugin-agent-rooms-agent_rooms-room_send`.
+  - Tool discovery (`getMcpToolsToolCall`) ran without approval.
+- **Claude→Cursor `room_send` (turn 3, plus 1 Claude task).** Under the user's `auto` mode, Claude called `mcp__agent_rooms_…__room_send {to:"Cursor"}`. Claude's init `tools` listed only `room_send`, because the bridge now hides `room_spawn` when spawning is disabled.
+  - The engine emitted `delegation` (`Claude → Cursor`) and ran a Cursor task containing the exact provenance header. Cursor's bridge child started, the task completed (session `5136311a-…`, `duration_ms` 16809), and the result came back to Claude as a successful `tool_result`.
+  - Claude's task then completed with `permission_denials: []` and a reported cost of $0.146, across 3 API iterations in one task.
+
+### Model turns used
+
+- **Cursor:** 4 turns that reached the model: single turn, resume + `room_send` attempt, Claude→Cursor target, and the denial event check. Two earlier spawns stopped at the trust check before any model request.
+- **Claude:** 1 task (the `room_send` caller).
+- **Codex:** not used; it is rate-limited until Sep 23, 1:44 AM.
+
+### Not verified for Cursor
+
+- An allowed Cursor-initiated `room_send`. This would need a user-owned allow rule such as `Mcp(plugin-agent-rooms-agent_rooms:room_send)`; the exact server-name form in rules has not been tested.
+- `room_spawn` of a Cursor agent against the real CLI, cancellation/SIGTERM of `cursor-agent` and its bridge child, failed-bridge detection (init reports no MCP status), and denial shapes for non-MCP tools.

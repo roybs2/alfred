@@ -10,6 +10,8 @@ if (!Number.isInteger(port) || port < 1 || port > 65535 || !token) process.exit(
 let peers = [];
 try { peers = JSON.parse(process.env.AGENT_ROOMS_PEERS || '[]'); } catch {}
 const directory = peers.map(({ name, id, provider }) => `${name} [${provider}, ${id}]`).join('; ') || 'none';
+// Tools this process may expose (set by the runner from room policy); default keeps both for older callers.
+const enabled = new Set((process.env.AGENT_ROOMS_TOOLS || 'room_send,room_spawn').split(','));
 const server = new McpServer({ name: 'agent-rooms', version: '0.1.0' });
 
 // node:http instead of fetch: delegated tasks can run far longer than undici's 300s headers timeout.
@@ -45,7 +47,7 @@ async function call(tool, args) {
   }
 }
 
-server.registerTool('room_send', {
+if (enabled.has('room_send')) server.registerTool('room_send', {
   description: `Send an exact task and optional exact context to an existing managed agent in this room, wait for its result. Address by unique name or ID. Current room agents: ${directory}`,
   inputSchema: {
     to: z.string().min(1).describe('Existing room agent name or ID'),
@@ -54,10 +56,10 @@ server.registerTool('room_send', {
   },
 }, async (args) => call('room_send', args));
 
-server.registerTool('room_spawn', {
-  description: 'Create a managed Claude or Codex agent in this room, give it a task, and wait for its result. Requires room collaboration policy.',
+if (enabled.has('room_spawn')) server.registerTool('room_spawn', {
+  description: 'Create a managed Claude, Codex, or Cursor agent in this room, give it a task, and wait for its result. Requires room collaboration policy.',
   inputSchema: {
-    provider: z.enum(['claude', 'codex']),
+    provider: z.enum(['claude', 'codex', 'cursor']),
     task: z.string().min(1).describe('Task to send unchanged'),
     context: z.string().optional().describe('Additional context to pass unchanged'),
     name: z.string().optional().describe('Name for the new room agent'),

@@ -4,8 +4,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
 type Agent = { id: string; name: string; available: boolean; path: string };
-type Provider = 'shell' | 'claude' | 'codex';
-type AgentProvider = 'claude' | 'codex';
+// Known providers get a real label/icon; any other provider string the engine
+// sends (a future one) still renders — see providerLabel/providerMark below.
+type KnownAgentProvider = 'claude' | 'codex' | 'cursor';
+type AgentProvider = KnownAgentProvider | (string & {});
+type Provider = 'shell' | KnownAgentProvider | (string & {});
 type TerminalSession = {
   id: string;
   kind: 'terminal';
@@ -23,7 +26,7 @@ type ManagedSession = {
   transcript: {
     id: string;
     taskId?: string;
-    role: 'user' | 'agent' | 'system' | 'task';
+    role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation';
     text: string;
   }[];
 };
@@ -46,7 +49,8 @@ type AgentEvent = {
     | 'task-completed'
     | 'task-failed'
     | 'session-stopped'
-    | 'delegation';
+    | 'delegation'
+    | 'permission-denied';
   sessionId: string;
   roomId: string;
   taskId?: string;
@@ -65,9 +69,24 @@ type ActivityItem = {
   id: string;
   text: string;
   time: number;
-  kind: 'system' | 'user';
+  kind: 'system' | 'user' | 'warning';
   streamKey?: string;
 };
+// A delegation event only proves that a source task handed work to a target
+// session/task. The live state of that child task comes from whatever
+// task-started/task-completed/task-failed events later arrive for it — never
+// invented here.
+type DelegationRecord = {
+  id: string;
+  roomId: string;
+  sourceSessionId: string;
+  sourceTaskId?: string;
+  targetSessionId: string;
+  targetTaskId?: string;
+  text: string;
+  time: number;
+};
+type TaskState = 'started' | 'completed' | 'failed';
 type Bridge = {
   detectAgents(): Promise<Agent[]>;
   chooseDirectory(): Promise<string | null>;
@@ -112,13 +131,39 @@ declare global {
     rooms?: Bridge;
   }
 }
+// Label/icon for every provider the app currently knows how to launch, plus
+// ones the engine may report without a launcher yet (e.g. Cursor).
+const providerInfo: Record<string, { label: string; mark: string }> = {
+  shell: { label: 'Terminal', mark: '>_' },
+  claude: { label: 'Claude Code', mark: '✳' },
+  codex: { label: 'Codex', mark: '◈' },
+  cursor: { label: 'Cursor', mark: '▣' },
+};
 const providers: { id: Provider; label: string; detail: string; mark: string }[] = [
-  { id: 'shell', label: 'Terminal', detail: 'Start a shell session', mark: '>_' },
-  { id: 'claude', label: 'Claude Code', detail: 'Launch Claude in this folder', mark: '✳' },
-  { id: 'codex', label: 'Codex', detail: 'Launch Codex in this folder', mark: '◈' },
+  { id: 'shell', label: providerInfo.shell.label, detail: 'Start a shell session', mark: providerInfo.shell.mark },
+  {
+    id: 'claude',
+    label: providerInfo.claude.label,
+    detail: 'Launch Claude in this folder',
+    mark: providerInfo.claude.mark,
+  },
+  {
+    id: 'codex',
+    label: providerInfo.codex.label,
+    detail: 'Launch Codex in this folder',
+    mark: providerInfo.codex.mark,
+  },
+  {
+    id: 'cursor',
+    label: providerInfo.cursor.label,
+    detail: 'Launch Cursor in this folder',
+    mark: providerInfo.cursor.mark,
+  },
 ];
-const providerLabel = (id: Provider) => providers.find((p) => p.id === id)?.label || id;
-const providerMark = (id: Provider) => providers.find((p) => p.id === id)?.mark || '◈';
+// Never assume only two providers exist: fall back to a generic label/icon
+// for anything the engine reports that isn't in providerInfo yet.
+const providerLabel = (id: Provider) => providerInfo[id]?.label || String(id);
+const providerMark = (id: Provider) => providerInfo[id]?.mark || '◈';
 const sessionName = (sessions: Session[], provider: Provider, kind: Session['kind']) => {
   const base =
     provider === 'shell'
@@ -140,7 +185,7 @@ const terminalRegistry = new Map<string, Terminal>();
 const outputBuffers = new Map<string, string[]>();
 const appendTranscript = (
   session: ManagedSession,
-  role: 'user' | 'agent' | 'system' | 'task',
+  role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation',
   text: string,
   taskId?: string,
 ): ManagedSession => {
@@ -160,7 +205,29 @@ const appendTranscript = (
   };
 };
 
-function TerminalPane({ session, onClose }: { session: TerminalSession; onClose: () => void }) {
+function TerminalPane({
+  session,
+  onClose,
+  renaming,
+  nameDraft,
+  renameError,
+  onStartRename,
+  onNameDraftChange,
+  onCommitRename,
+  onCancelRename,
+  onBlurRename,
+}: {
+  session: TerminalSession;
+  onClose: () => void;
+  renaming: boolean;
+  nameDraft: string;
+  renameError: string;
+  onStartRename: () => void;
+  onNameDraftChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onBlurRename: () => void;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const status = useRef(session.status);
   status.current = session.status;
@@ -225,10 +292,35 @@ function TerminalPane({ session, onClose }: { session: TerminalSession; onClose:
   return (
     <section className="terminal-card">
       <header className="terminal-head">
-        <span className={'provider-mark ' + session.provider}>
-          {providers.find((p) => p.id === session.provider)?.mark}
-        </span>
-        <b>{session.name}</b>
+        <span className={'provider-mark ' + session.provider}>{providerMark(session.provider)}</span>
+        {renaming ? (
+          <span className="pane-name-wrap">
+            <input
+              autoFocus
+              aria-label={'Rename ' + session.name}
+              className="pane-name-input"
+              value={nameDraft}
+              maxLength={80}
+              onChange={(e) => onNameDraftChange(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onCommitRename();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  onCancelRename();
+                }
+              }}
+              onBlur={onBlurRename}
+            />
+            {renameError && <span className="rename-error">{renameError}</span>}
+          </span>
+        ) : (
+          <b className="pane-name" title="Double-click to rename" onDoubleClick={onStartRename}>
+            {session.name}
+          </b>
+        )}
         <span className={'run-state ' + session.status}>
           <i />
           {session.status}
@@ -254,10 +346,26 @@ function ManagedPane({
   session,
   onClose,
   onRun,
+  renaming,
+  nameDraft,
+  renameError,
+  onStartRename,
+  onNameDraftChange,
+  onCommitRename,
+  onCancelRename,
+  onBlurRename,
 }: {
   session: ManagedSession;
   onClose: () => void;
   onRun: (text: string) => Promise<void>;
+  renaming: boolean;
+  nameDraft: string;
+  renameError: string;
+  onStartRename: () => void;
+  onNameDraftChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onBlurRename: () => void;
 }) {
   const [task, setTask] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -284,7 +392,34 @@ function ManagedPane({
         <span className={'provider-mark ' + session.provider}>
           {providerMark(session.provider)}
         </span>
-        <b>{session.name}</b>
+        {renaming ? (
+          <span className="pane-name-wrap">
+            <input
+              autoFocus
+              aria-label={'Rename ' + session.name}
+              className="pane-name-input"
+              value={nameDraft}
+              maxLength={80}
+              onChange={(e) => onNameDraftChange(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onCommitRename();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  onCancelRename();
+                }
+              }}
+              onBlur={onBlurRename}
+            />
+            {renameError && <span className="rename-error">{renameError}</span>}
+          </span>
+        ) : (
+          <b className="pane-name" title="Double-click to rename" onDoubleClick={onStartRename}>
+            {session.name}
+          </b>
+        )}
         <span className="mode-tag">MANAGED AGENT</span>
         <span className={'run-state ' + session.status}>
           <i />
@@ -310,7 +445,11 @@ function ManagedPane({
                     ? session.name.toUpperCase()
                     : entry.role === 'task'
                       ? 'DELIVERED TASK'
-                      : 'STATUS'}
+                      : entry.role === 'warning'
+                        ? 'WARNING · ' + providerLabel(session.provider).toUpperCase()
+                        : entry.role === 'delegation'
+                          ? 'DELEGATION'
+                          : 'STATUS'}
               </span>
               <p>{entry.text}</p>
             </div>
@@ -373,6 +512,14 @@ export default function App() {
   const [confirmRemoveRoom, setConfirmRemoveRoom] = useState(false);
   const confirmRemoveTimer = useRef<number | undefined>(undefined);
   const [activityByRoom, setActivityByRoom] = useState<Record<string, ActivityItem[]>>({});
+  const [delegationsByRoom, setDelegationsByRoom] = useState<Record<string, DelegationRecord[]>>(
+    {},
+  );
+  // roomId:sessionId:taskId -> the last state a real event proved for that task.
+  const [taskStateByKey, setTaskStateByKey] = useState<Record<string, TaskState>>({});
+  const [renamingSessionId, setRenamingSessionId] = useState('');
+  const [sessionNameDraft, setSessionNameDraft] = useState('');
+  const [renameError, setRenameError] = useState('');
   const [draft, setDraft] = useState('');
   const [target, setTarget] = useState('');
   const [renaming, setRenaming] = useState(false);
@@ -382,7 +529,7 @@ export default function App() {
   const canPersist = useRef(false);
   const lastSavedMetadata = useRef('');
   const appendActivity = useCallback(
-    (text: string, kind: 'system' | 'user' = 'system', roomId?: string) => {
+    (text: string, kind: 'system' | 'user' | 'warning' = 'system', roomId?: string) => {
       const id = roomId || selectedRef.current;
       if (!id) return;
       setActivityByRoom((prev) => ({
@@ -535,10 +682,9 @@ export default function App() {
         return;
       }
       const owner = roomsRef.current.find((r) => r.id === event.roomId);
-      const name =
-        owner?.sessions.find((s) => s.id === event.sessionId)?.name ||
-        event.session?.name ||
-        'Agent';
+      const eventSession = owner?.sessions.find((s) => s.id === event.sessionId);
+      const name = eventSession?.name || event.session?.name || 'Agent';
+      const eventProvider = eventSession?.provider || event.session?.provider;
       setRooms((prev) =>
         prev.map((room) =>
           room.id !== event.roomId
@@ -568,12 +714,51 @@ export default function App() {
                     );
                   if (event.type === 'session-stopped') return { ...session, status: 'stopped' };
                   if (event.type === 'delegation' && event.text)
-                    return appendTranscript(session, 'system', event.text, event.taskId);
+                    return appendTranscript(session, 'delegation', event.text, event.taskId);
+                  if (event.type === 'permission-denied')
+                    return appendTranscript(
+                      session,
+                      'warning',
+                      'Permission denied by ' +
+                        providerLabel(session.provider) +
+                        ': ' +
+                        (event.text || 'unspecified action') +
+                        '. Provider permissions were not bypassed.',
+                      event.taskId,
+                    );
                   return session;
                 }),
               },
         ),
       );
+      if (event.taskId && (event.type === 'task-started' || event.type === 'task-completed' || event.type === 'task-failed')) {
+        const key = event.roomId + ':' + event.sessionId + ':' + event.taskId;
+        const state: TaskState =
+          event.type === 'task-started'
+            ? 'started'
+            : event.type === 'task-completed'
+              ? 'completed'
+              : 'failed';
+        setTaskStateByKey((prev) => ({ ...prev, [key]: state }));
+      }
+      if (event.type === 'delegation' && event.targetSessionId) {
+        setDelegationsByRoom((prev) => ({
+          ...prev,
+          [event.roomId]: [
+            ...(prev[event.roomId] || []),
+            {
+              id: makeId(),
+              roomId: event.roomId,
+              sourceSessionId: event.sessionId,
+              sourceTaskId: event.taskId,
+              targetSessionId: event.targetSessionId!,
+              targetTaskId: event.targetTaskId,
+              text: event.text || '',
+              time: Date.now(),
+            },
+          ].slice(-80),
+        }));
+      }
       if (event.type === 'task-started')
         appendActivity(name + ' started a task.', 'system', event.roomId);
       if (event.type === 'output') appendOutputActivity(event, name);
@@ -589,6 +774,17 @@ export default function App() {
         appendActivity(name + ' stopped.', 'system', event.roomId);
       if (event.type === 'delegation' && event.text)
         appendActivity('Delegation: ' + event.text, 'system', event.roomId);
+      if (event.type === 'permission-denied')
+        appendActivity(
+          'Permission denied for ' +
+            name +
+            (eventProvider ? ' (' + providerLabel(eventProvider) + ')' : '') +
+            ': ' +
+            (event.text || 'unspecified action') +
+            '. Provider permissions were not bypassed.',
+          'warning',
+          event.roomId,
+        );
     });
   }, [bridge, appendActivity, appendOutputActivity]);
   useEffect(() => {
@@ -776,6 +972,102 @@ export default function App() {
     );
     if (owner) appendActivity(session.name + ' closed.', 'system', owner.id);
   }
+  const focusSession = useCallback((id: string) => {
+    document.getElementById('pane-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    terminalRegistry.get(id)?.focus();
+    setTarget(id);
+  }, []);
+  const renameOpenedAt = useRef(0);
+  const startRename = useCallback((session: Session) => {
+    renameOpenedAt.current = Date.now();
+    setRenamingSessionId(session.id);
+    setSessionNameDraft(session.name);
+    setRenameError('');
+  }, []);
+  const cancelRename = useCallback(() => {
+    setRenamingSessionId('');
+    setRenameError('');
+  }, []);
+  // Closing on blur — but the double-click that opens the field also fires
+  // a same-tick focus/blur pair on some platforms (the field mounts and
+  // grabs focus mid dblclick before the OS has actually settled focus on
+  // the window). A blur landing within that opening window is that
+  // artifact, not the user clicking away, so it is ignored; any later blur
+  // closes the field as expected.
+  const blurCancelRename = useCallback(() => {
+    if (Date.now() - renameOpenedAt.current > 250) cancelRename();
+  }, [cancelRename]);
+  // Applies the pending rename in sessionNameDraft to `session`. Names must
+  // stay unique within the room — case-insensitively, since room_send
+  // addressing a managed session by name should not depend on case — and a
+  // rejected rename keeps editing open with an inline error rather than
+  // silently accepting a collision. This is UI/display state only — there
+  // is no backend IPC yet to rename the underlying agent-engine session, so
+  // a managed session's actual room_send address does not change until one
+  // exists (rooms:rename-agent-session).
+  const commitRename = useCallback(
+    (session: Session): boolean => {
+      const room = roomsRef.current.find((r) => r.sessions.some((s) => s.id === session.id));
+      if (!room) {
+        setRenamingSessionId('');
+        setRenameError('');
+        return false;
+      }
+      // Re-read the exact session this rename targets from live room state,
+      // never a stale closure, so the result can only ever apply to it.
+      const target = room.sessions.find((s) => s.id === session.id);
+      if (!target) {
+        setRenamingSessionId('');
+        setRenameError('');
+        return false;
+      }
+      const trimmed = sessionNameDraft.trim().slice(0, 80);
+      if (!trimmed) {
+        setRenameError('Session name cannot be empty.');
+        return false;
+      }
+      if (trimmed === target.name) {
+        setRenamingSessionId('');
+        setRenameError('');
+        return true;
+      }
+      const duplicate = room.sessions.some(
+        (s) => s.id !== target.id && s.name.toLowerCase() === trimmed.toLowerCase(),
+      );
+      if (duplicate) {
+        setRenameError(
+          'Already used in this room.' +
+            (target.kind === 'managed' ? ' room_send addresses sessions by name.' : ''),
+        );
+        return false;
+      }
+      const previousName = target.name;
+      setRooms((prev) =>
+        prev.map((r) =>
+          r.id !== room.id
+            ? r
+            : {
+                ...r,
+                sessions: r.sessions.map((s) => (s.id === target.id ? { ...s, name: trimmed } : s)),
+              },
+        ),
+      );
+      appendActivity(
+        previousName +
+          ' renamed to ' +
+          trimmed +
+          (target.kind === 'managed'
+            ? '. Display name only — room_send addressing needs a rooms:rename-agent-session IPC, which does not exist yet.'
+            : '.'),
+        'user',
+        room.id,
+      );
+      setRenamingSessionId('');
+      setRenameError('');
+      return true;
+    },
+    [sessionNameDraft, appendActivity],
+  );
   useEffect(() => {
     if (!menu) {
       window.clearTimeout(confirmRemoveTimer.current);
@@ -801,6 +1093,39 @@ export default function App() {
     setSelected(rooms.find((r) => r.id !== room.id)?.id || '');
   }
   const activity = current ? activityByRoom[current.id] || [] : [];
+  const delegations = current ? delegationsByRoom[current.id] || [] : [];
+  // Always resolves by session id, never by name, so two sessions that
+  // happen to share a display name (or a session that has since been
+  // renamed or removed) are never confused with each other.
+  const sessionLabel = (id: string) => {
+    const found = current?.sessions.find((s) => s.id === id);
+    if (!found) return id;
+    return found.name + ' (' + providerLabel(found.provider) + ')';
+  };
+  const taskState = (sessionId: string, taskId?: string): TaskState | undefined =>
+    current && taskId ? taskStateByKey[current.id + ':' + sessionId + ':' + taskId] : undefined;
+  // Group delegations under their parent (source session + source task) so
+  // Room Activity can show child tasks indented under the task that spawned
+  // them, exactly as the delegation events proved it.
+  const delegationGroups = (() => {
+    const map = new Map<
+      string,
+      { sourceSessionId: string; sourceTaskId?: string; items: DelegationRecord[] }
+    >();
+    for (const item of delegations) {
+      const key = item.sourceSessionId + ':' + (item.sourceTaskId || '');
+      const group =
+        map.get(key) ||
+        ({ sourceSessionId: item.sourceSessionId, sourceTaskId: item.sourceTaskId, items: [] } as {
+          sourceSessionId: string;
+          sourceTaskId?: string;
+          items: DelegationRecord[];
+        });
+      group.items.push(item);
+      map.set(key, group);
+    }
+    return Array.from(map.entries()).map(([key, group]) => ({ key, ...group }));
+  })();
   const activeSession =
     current?.sessions.find(
       (s) => s.id === target && s.kind === 'terminal' && s.status === 'running',
@@ -915,27 +1240,67 @@ export default function App() {
                 <span className="room-session-count">{room.sessions.length || ''}</span>
               </button>
               {room.id === selected &&
-                room.sessions.map((s, index) => (
-                  <button
-                    key={s.id}
-                    aria-label={'Focus ' + s.name + ' session'}
-                    className={'session-row ' + (target === s.id ? 'focused' : '')}
-                    onClick={() => {
-                      document
-                        .getElementById('pane-' + s.id)
-                        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                      terminalRegistry.get(s.id)?.focus();
-                      setTarget(s.id);
-                    }}
-                  >
-                    <span className="tree-mark">
-                      {index === room.sessions.length - 1 ? '└' : '├'}
-                    </span>
-                    <span className={'session-mini ' + s.status} />
-                    <span className="session-row-name">{s.name}</span>
-                    <span className="session-status-label">{s.status}</span>
-                  </button>
-                ))}
+                room.sessions.map((s, index) =>
+                  renamingSessionId === s.id ? (
+                    <div className="session-row session-row-editing" key={s.id}>
+                      <span className="tree-mark">
+                        {index === room.sessions.length - 1 ? '└' : '├'}
+                      </span>
+                      <span className={'session-mini ' + s.status} />
+                      <span className="pane-name-wrap">
+                        <input
+                          autoFocus
+                          aria-label={'Rename ' + s.name}
+                          className="session-name-input"
+                          value={sessionNameDraft}
+                          maxLength={80}
+                          onChange={(e) => setSessionNameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              commitRename(s);
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault();
+                              cancelRename();
+                            }
+                          }}
+                          onBlur={blurCancelRename}
+                        />
+                        {renameError && <span className="rename-error">{renameError}</span>}
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      key={s.id}
+                      aria-label={'Focus ' + s.name + ' session'}
+                      className={'session-row ' + (target === s.id ? 'focused' : '')}
+                      onClick={() => focusSession(s.id)}
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        startRename(s);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          const rows = Array.from(
+                            document.querySelectorAll<HTMLElement>('.session-row'),
+                          );
+                          const at = rows.indexOf(e.currentTarget);
+                          const next = rows[at + (e.key === 'ArrowDown' ? 1 : -1)];
+                          next?.focus();
+                        }
+                      }}
+                    >
+                      <span className="tree-mark">
+                        {index === room.sessions.length - 1 ? '└' : '├'}
+                      </span>
+                      <span className={'session-mini ' + s.status} />
+                      <span className="session-row-name">{s.name}</span>
+                      <span className="session-status-label">{s.status}</span>
+                    </button>
+                  ),
+                )}
             </div>
           ))}
         </nav>
@@ -1201,12 +1566,32 @@ export default function App() {
                             <TerminalPane
                               session={session}
                               onClose={() => void closeSession(session)}
+                              renaming={renamingSessionId === session.id}
+                              nameDraft={
+                                renamingSessionId === session.id ? sessionNameDraft : session.name
+                              }
+                              renameError={renamingSessionId === session.id ? renameError : ''}
+                              onStartRename={() => startRename(session)}
+                              onNameDraftChange={setSessionNameDraft}
+                              onCommitRename={() => commitRename(session)}
+                              onCancelRename={cancelRename}
+                              onBlurRename={blurCancelRename}
                             />
                           ) : (
                             <ManagedPane
                               session={session}
                               onClose={() => void closeSession(session)}
                               onRun={(text) => runAgentTask(session, text)}
+                              renaming={renamingSessionId === session.id}
+                              nameDraft={
+                                renamingSessionId === session.id ? sessionNameDraft : session.name
+                              }
+                              renameError={renamingSessionId === session.id ? renameError : ''}
+                              onStartRename={() => startRename(session)}
+                              onNameDraftChange={setSessionNameDraft}
+                              onCommitRename={() => commitRename(session)}
+                              onCancelRename={cancelRename}
+                              onBlurRename={blurCancelRename}
                             />
                           )}
                         </div>
@@ -1256,7 +1641,9 @@ export default function App() {
                   {activity.length ? (
                     activity.map((item) => (
                       <div key={item.id} className={'activity-item ' + item.kind}>
-                        <span className="activity-symbol">{item.kind === 'user' ? '↗' : '·'}</span>
+                        <span className="activity-symbol">
+                          {item.kind === 'user' ? '↗' : item.kind === 'warning' ? '⚠' : '·'}
+                        </span>
                         <div>
                           <p>{item.text}</p>
                           <time>
@@ -1276,6 +1663,57 @@ export default function App() {
                     </div>
                   )}
                 </div>
+                {delegationGroups.length > 0 && (
+                  <div className="delegation-view">
+                    <div className="delegation-head">
+                      <span className="section-overline">VERIFIED DELEGATION</span>
+                      <h3>Delegations</h3>
+                    </div>
+                    <div className="delegation-list">
+                      {delegationGroups.map((group) => {
+                        const parentState = taskState(group.sourceSessionId, group.sourceTaskId);
+                        return (
+                          <div className="delegation-group" key={group.key}>
+                            <button
+                              className="delegation-parent"
+                              onClick={() => focusSession(group.sourceSessionId)}
+                            >
+                              <span className="delegation-name">
+                                {sessionLabel(group.sourceSessionId)}
+                              </span>
+                              {parentState && (
+                                <span className={'delegation-state ' + parentState}>
+                                  {parentState}
+                                </span>
+                              )}
+                            </button>
+                            <div className="delegation-children">
+                              {group.items.map((item) => {
+                                const state = taskState(item.targetSessionId, item.targetTaskId);
+                                return (
+                                  <button
+                                    className="delegation-child"
+                                    key={item.id}
+                                    onClick={() => focusSession(item.targetSessionId)}
+                                    title={item.text}
+                                  >
+                                    <span className="tree-mark">└</span>
+                                    <span className="delegation-name">
+                                      {sessionLabel(item.sourceSessionId)} → {sessionLabel(item.targetSessionId)}
+                                    </span>
+                                    <span className={'delegation-state ' + (state || 'delegated')}>
+                                      {state || 'delegated'}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <div className="room-policy">
                   <label className="policy-toggle">
                     <input
@@ -1289,8 +1727,9 @@ export default function App() {
                     <span>Allow agents to create sessions</span>
                   </label>
                   <div className="policy-detail">
-                    Connected agents can message peers. Enable this to let them create new sessions.
-                    Provider permissions still apply.
+                    Managed agents in this room can message each other with room_send at any time.
+                    Enabling this also lets them create new sessions with room_spawn. Provider
+                    permissions still apply.
                   </div>
                   <label className="policy-toggle">
                     <input
@@ -1312,7 +1751,8 @@ export default function App() {
                     Lets managed agents call only this room&apos;s room_send
                     {current.allowSpawn ? ' and room_spawn' : ''} tools without a provider
                     permission prompt. All other tools keep your provider permissions, and your
-                    deny rules still apply.
+                    deny rules still apply. Does not apply to Cursor sessions: Cursor only honors
+                    allow rules from its own config files, which Agent Rooms does not write.
                   </div>
                   <label className="policy-limit">
                     Session limit

@@ -8,6 +8,9 @@ const MAX_AGENTS = 12;
 const MAX_QUEUED_TASKS = 16;
 const MAX_DEPTH = 4;
 const TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const PROVIDERS = ['claude', 'codex', 'cursor'];
+const PROVIDER_LABELS = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
+const MAX_DENIAL_TEXT = 300;
 
 function nonempty(value, label, max = MAX_TEXT) {
   if (typeof value !== 'string' || !value.length || value.length > max || value.includes('\0'))
@@ -45,7 +48,7 @@ class AgentEngine {
 
   createSession({ roomId, provider, cwd, name }, { spawnedBy = null } = {}) {
     nonempty(roomId, 'room id', 80);
-    if (provider !== 'claude' && provider !== 'codex') throw new TypeError('Invalid provider');
+    if (!PROVIDERS.includes(provider)) throw new TypeError('Invalid provider');
     nonempty(cwd, 'working directory', 4096);
     if (name !== undefined) nonempty(name, 'agent name', 80);
     const room = this.rooms.get(roomId) || { cwd: null, policy: { allowSpawn: false, maxAgents: 4, preapproveRoomTools: false } };
@@ -56,7 +59,7 @@ class AgentEngine {
     if (!room.cwd) room.cwd = cwd;
     this.rooms.set(roomId, room);
     const id = crypto.randomUUID();
-    const session = { id, roomId, provider, name: name || `${provider === 'claude' ? 'Claude' : 'Codex'} ${id.slice(0, 8)}`, status: 'idle' };
+    const session = { id, roomId, provider, name: name || `${PROVIDER_LABELS[provider]} ${id.slice(0, 8)}`, status: 'idle' };
     const item = { ...session, cwd, queue: [], active: null, providerSessionId: null, token: null };
     this.sessions.set(id, item);
     this.emit({ type: 'session-created', sessionId: id, roomId, session });
@@ -125,6 +128,12 @@ class AgentEngine {
         onOutput: (text) => {
           if (!task.settled && this.sessions.get(session.id) === session)
             this.emit({ type: 'output', sessionId: session.id, roomId: session.roomId, taskId: task.id, text });
+        },
+        // Provider-reported tool permission denials: tool name and the provider's short reason only.
+        onPermissionDenied: (text) => {
+          if (task.settled || this.sessions.get(session.id) !== session || typeof text !== 'string' || !text) return;
+          this.emit({ type: 'permission-denied', sessionId: session.id, roomId: session.roomId, taskId: task.id,
+            text: text.slice(0, MAX_DENIAL_TEXT) });
         },
       });
       if (task.settled) return;
@@ -220,7 +229,7 @@ class AgentEngine {
       target = this.resolveDestination(source, args.to);
     } else if (tool === 'room_spawn') {
       if (!room.policy.allowSpawn) throw new Error('Room agent spawning is disabled');
-      if (args.provider !== 'claude' && args.provider !== 'codex') throw new TypeError('Invalid provider');
+      if (!PROVIDERS.includes(args.provider)) throw new TypeError('Invalid provider');
       target = this.createSession({ roomId: source.roomId, cwd: source.cwd, provider: args.provider, name: args.name }, { spawnedBy: source.id });
       target = this.sessions.get(target.id);
       spawned = true;
@@ -302,4 +311,4 @@ class BridgeBroker {
   }
 }
 
-module.exports = { AgentEngine, BridgeBroker };
+module.exports = { AgentEngine, BridgeBroker, PROVIDERS };

@@ -56,6 +56,21 @@ The output contained `agent_rooms /usr/bin/false --stdio ROOMS_TEST=***** ... en
 
 Codex App Server is the richer structured alternative: the documented JSON-RPC lifecycle is `initialize`/`initialized`, `thread/start` or `thread/resume`, `turn/start`, streamed `item/*` and `turn/*`, with `turn/completed` statuses `completed`, `interrupted`, or `failed`; `turn/interrupt` requests cancellation. The installed CLI exposes `codex app-server --listen stdio://` and process-level `-c` overrides. It can reuse the signed-in CLI installation without adopting API-key SDK auth, but its protocol has more plumbing than the initial CLI adapter. Official docs expose a `config` object on `thread/start`/`thread/resume` while not specifying MCP override semantics there. Prefer process-level `-c` with a dedicated app-server process if later choosing app-server; don't assume undocumented thread-level MCP injection.
 
+## Cursor CLI adapter
+
+Researched and live-tested 2026-09-22 against `cursor-agent` 2026.09.18-9a7762b. Evidence is in [adapters.md](adapters.md#cursor-cli-live-verification-2026-09-22), and the reasoning is in the decision log.
+
+```sh
+cursor-agent -p --output-format stream-json --stream-partial-output \
+  --plugin-dir "$TMP/agent-rooms" [--resume "$CHAT_ID"] -- '<exact task>'
+```
+
+- **PTY.** The PTY path launches `cursor-agent` with no arguments; its interactive trust and approval prompts are the user's.
+- **Output.** Streamed text comes from `assistant` events with `timestamp_ms` and no `model_call_id`. `result.result` is the final text and `session_id` is the chat id; `result.is_error` marks failure.
+- **MCP.** Cursor documents no per-process MCP config. The documented `--plugin-dir` loads a temporary plugin (`.cursor-plugin/plugin.json` + `mcp.json`) defining only the room bridge. The runner does not write project or home config.
+- **Permissions.** Print mode keeps the user's Cursor permission config. Without `--force`, edits are proposed only. MCP tools need approval, and in print mode they are auto-rejected unless the user's own `Mcp(server:tool)` allow rules cover them. Rejections become `permission-denied` events. The runner never passes `--force`, `--yolo`, `--approve-mcps`, `--auto-review`, `--sandbox`, or `--trust`.
+- **Not reported.** `system/init` has no MCP server status, so a failed bridge is not detected before the turn.
+
 ## What is verified and what remains
 
 Verified locally without model work (earlier): exact installed versions and help flags; Codex `-c` parsing for MCP command/args/env via read-only list; official configuration and app-server entry points.
@@ -83,9 +98,13 @@ Not verified end to end:
 - `room_spawn`, busy-session queueing, duplicate suppression, and cancellation of a delegated call against real providers.
 - Cost attribution beyond Claude's reported `total_cost_usd`.
 
+- Cursor: an allowed Cursor-initiated room tool call, `room_spawn`, cancellation, and failed-bridge detection (see adapters.md).
+
 Never claim redirect of native provider subagents unless a provider documents and a test proves that path.
 
 ## Primary references
+
+- [Cursor CLI: Output format](https://cursor.com/docs/cli/reference/output-format), [Headless](https://cursor.com/docs/cli/headless), [Permissions](https://cursor.com/docs/cli/reference/permissions), [MCP](https://cursor.com/docs/context/mcp), [Plugins](https://cursor.com/docs/reference/plugins).
 
 - [Claude Code: Run programmatically](https://code.claude.com/docs/en/headless) — print/JSON/stream-json output, result and session IDs, resume, MCP config validation, and session metadata.
 - [Claude Code: CLI reference](https://code.claude.com/docs/en/cli-reference) — current flag surface.
