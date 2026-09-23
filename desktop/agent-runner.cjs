@@ -153,6 +153,16 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
         let sessionId = providerSessionId;
         let finalText;
         let streamedText = false;
+        // Text streamed in separate assistant segments (e.g. a preamble before a tool call and the answer after
+        // it) arrives with no separator; mark the boundary so the display gets a paragraph break, not "back.Always".
+        let segmentBreak = false;
+        const streamDelta = (delta) => {
+          if (delta.length > MAX_DISPLAY_TEXT) { providerError = new Error('Provider text chunk exceeded display limit'); return; }
+          const text = segmentBreak ? '\n\n' + delta.replace(/^\s+/, '') : delta;
+          segmentBreak = false;
+          streamedText = true;
+          onOutput(text);
+        };
         let providerError;
         let turnCompleted = false;
         let settled = false;
@@ -203,11 +213,10 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
               // Stop before the model turn: the room tools would be unavailable and the turn would still be billed.
               if (failed || missing) { fail(new Error('Room MCP bridge failed to initialize')); return; }
             }
+            // Each new content block (text after a tool_use, or a later message) starts a new segment.
+            if (item.type === 'stream_event' && item.event?.type === 'content_block_start' && streamedText) segmentBreak = true;
             const delta = item.type === 'stream_event' && item.event?.delta?.type === 'text_delta' ? item.event.delta.text : null;
-            if (typeof delta === 'string' && delta) {
-              if (delta.length > MAX_DISPLAY_TEXT) providerError = new Error('Provider text chunk exceeded display limit');
-              else { streamedText = true; onOutput(delta); }
-            }
+            if (typeof delta === 'string' && delta) streamDelta(delta);
             if (item.type === 'system' && item.subtype === 'permission_denied') deny(item.tool_use_id, item.tool_name, item.message);
             if (item.type === 'result' && Array.isArray(item.permission_denials))
               for (const d of item.permission_denials) deny(d?.tool_use_id, d?.tool_name);
@@ -221,9 +230,11 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
             // (model_call_id) and the final complete assistant message repeat already-streamed text.
             if (item.type === 'assistant' && typeof item.timestamp_ms === 'number' && item.model_call_id === undefined) {
               const delta = (item.message?.content || []).filter((c) => c?.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('');
-              if (delta.length > MAX_DISPLAY_TEXT) providerError = new Error('Provider text chunk exceeded display limit');
-              else if (delta) { streamedText = true; onOutput(delta); }
+              if (delta) streamDelta(delta);
             }
+            // The pre-tool flush (model_call_id) and tool calls end the current text segment.
+            if (streamedText && ((item.type === 'assistant' && item.model_call_id !== undefined) || item.type === 'tool_call'))
+              segmentBreak = true;
             if (item.type === 'tool_call' && item.subtype === 'started' && typeof item.call_id === 'string' && cursorTools.size < 256)
               cursorTools.set(item.call_id, cursorToolName(item.tool_call));
             if (item.type === 'tool_call' && item.subtype === 'completed') {

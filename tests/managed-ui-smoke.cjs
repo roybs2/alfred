@@ -180,6 +180,19 @@ const path = require('node:path');
       return el?.querySelector('.delegation-state')?.textContent === 'completed';
     });
 
+    // Live-demo regressions: the delegation row shows the full target name and
+    // provider (wraps, never ellipsized), and Room Activity keeps the newest
+    // entry in view rather than staying scrolled to the top.
+    const delegationFits = await page.evaluate(() => {
+      const el = document.querySelector('.delegation-child .delegation-name');
+      return el ? el.scrollWidth <= el.clientWidth && getComputedStyle(el).textOverflow !== 'ellipsis' : false;
+    });
+    assert.ok(delegationFits, 'Delegation child name must not be truncated');
+    await page.waitForFunction(() => {
+      const list = document.querySelector('.activity-list');
+      return !!list && list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+    });
+
     // Clicking a delegation entry focuses that session in the sidebar.
     await delegationChild.click();
     await page.waitForFunction(
@@ -216,6 +229,18 @@ const path = require('node:path');
       .locator('#pane-synthetic-child .transcript-entry.warning span')
       .getByText('WARNING · CODEX', { exact: true })
       .waitFor();
+    // Output that resumes after a warning starts a new agent entry; the
+    // runner's segment-break newlines must not render as a blank gap there.
+    await send({
+      type: 'output',
+      sessionId: child.id,
+      roomId,
+      taskId: 'synthetic-task',
+      text: '\n\nResumed after denial',
+    });
+    const resumed = page.locator('#pane-synthetic-child .transcript-entry.agent p').last();
+    await resumed.getByText('Resumed after denial').waitFor();
+    assert.equal(await resumed.evaluate((el) => el.textContent), 'Resumed after denial');
 
     // A Cursor managed session, so a Cursor-specific permission denial also
     // renders with a real "Cursor" label/icon (never a hardcoded two-provider
@@ -322,9 +347,13 @@ const path = require('node:path');
         innerWidth: window.innerWidth,
         scrollWidth: document.documentElement.scrollWidth,
         panelRight: rect?.right,
+        feedHeight: document.querySelector('.activity-list')?.clientHeight ?? 0,
       };
     });
     assert.ok(layout.panelRight <= layout.innerWidth, 'Room Activity panel must not extend past the window');
+    // The feed must stay readable even when delegations, policy and handoff
+    // share the panel in a short window (the live demo saw it crushed to ~1 item).
+    assert.ok(layout.feedHeight >= 200, `Room Activity feed must not collapse (got ${layout.feedHeight}px)`);
     assert.ok(
       layout.scrollWidth <= layout.innerWidth,
       'The app must not need horizontal scroll/clip at the 860px minimum width',

@@ -781,6 +781,9 @@ button {
   min-height: 0;
   min-width: 0;
   overflow-x: hidden;
+  /* Delegations, policy and handoff sit below the feed; when the window is too
+     short for all of them the panel scrolls instead of crushing the feed. */
+  overflow-y: auto;
 }
 .activity-panel h2,
 .activity-panel h3,
@@ -823,7 +826,9 @@ button {
 }
 .activity-list {
   overflow: auto;
-  flex: 1;
+  flex: 1 0 auto;
+  height: 0;
+  min-height: 220px;
   padding: 14px 14px 10px;
 }
 .activity-empty {
@@ -1373,9 +1378,11 @@ button {
 }
 .delegation-name {
   flex: 1;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  min-width: 0;
+  /* Wrap rather than ellipsize: the target name and provider are the point. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
 }
 .delegation-state {
   flex: 0 0 auto;

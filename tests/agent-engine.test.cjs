@@ -334,6 +334,27 @@ test('claude runner accepts the live init shape and captures session id and fina
   assert.deepEqual(output, ['OK']);
 });
 
+test('claude runner separates text segments split by a tool call with a paragraph break (live demo: "back.Always")', async () => {
+  const spawned = [];
+  const output = [];
+  const runner = cliRunner({ executableFor: () => '/bin/claude', spawnProcess: fakeSpawn(spawned) });
+  const run = runner.run({ provider: 'claude', cwd: '/a', text: 'Hi', bridge: bridgeInfo, onOutput: (t) => output.push(t) });
+  const ev = (event) => ({ type: 'stream_event', session_id: 's', event });
+  spawned[0].child.stdout.end([
+    { type: 'system', subtype: 'init', session_id: 's', mcp_servers: [{ name: 'agent_rooms_aaaa_bbbb', status: 'connected' }] },
+    ev({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    ev({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Asking' } }),
+    ev({ type: 'content_block_delta', delta: { type: 'text_delta', text: ' Cursor.' } }),
+    ev({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'room_send' } }),
+    ev({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    ev({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Cursor says: hi' } }),
+    { type: 'result', subtype: 'success', is_error: false, session_id: 's', result: 'Cursor says: hi' },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  spawned[0].child.emit('close', 0, null);
+  await run;
+  assert.equal(output.join(''), 'Asking Cursor.\n\nCursor says: hi');
+});
+
 test('codex runner reports the inner API error message and a required bridge startup failure', async () => {
   const spawned = [];
   const runner = cliRunner({ executableFor: () => '/bin/codex', spawnProcess: fakeSpawn(spawned) });
@@ -476,7 +497,7 @@ test('cursor runner streams only text deltas, reports rejected tools as denials,
   spawned[0].child.stdout.end(cursorLive('chat-2'));
   spawned[0].child.emit('close', 0, null);
   await run;
-  assert.deepEqual(output, ['Calling', ' tool.', 'DONE'], 'no duplicate flush or final message');
+  assert.deepEqual(output, ['Calling', ' tool.', '\n\nDONE'], 'no duplicate flush or final message; a paragraph break separates the pre-tool and post-tool segments');
   assert.equal(denials.length, 1);
   assert.equal(denials[0], 'room_send: User rejected MCP: plugin-agent-rooms-agent_rooms-room_send');
   assert(!denials[0].includes('secret task text'), 'denials never include tool input');

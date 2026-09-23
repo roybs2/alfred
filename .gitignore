@@ -5,3 +5,13 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Agent/tool artifacts and local runs — never commit
+.claude/
+.cursor/
+.codex/
+.mcp.json
+release/
+out/
+scratch/
+*.tmp

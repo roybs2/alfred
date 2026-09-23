@@ -207,6 +207,12 @@ const appendTranscript = (
       ],
     };
   }
+  // A new agent entry (e.g. output resuming after a warning) must not open with
+  // the runner's segment-break whitespace; that only belongs inside an entry.
+  if (role === 'agent') {
+    text = text.replace(/^\s+/, '');
+    if (!text) return session;
+  }
   return {
     ...session,
     transcript: [
@@ -1119,6 +1125,24 @@ export default function App() {
     setSelected(rooms.find((r) => r.id !== room.id)?.id || '');
   }
   const activity = current ? activityByRoom[current.id] || [] : [];
+  // Keep the newest activity in view (a live run appends many items), but never
+  // yank the list away from someone who scrolled up to read older entries.
+  const activityList = useRef<HTMLDivElement>(null);
+  const activityPinned = useRef(true);
+  const activityAutoTop = useRef(0);
+  const lastActivityRoom = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const el = activityList.current;
+    if (!el) return;
+    if (lastActivityRoom.current !== current?.id) {
+      lastActivityRoom.current = current?.id;
+      activityPinned.current = true;
+    }
+    if (activityPinned.current) {
+      el.scrollTop = el.scrollHeight;
+      activityAutoTop.current = el.scrollTop;
+    }
+  }, [activity, current?.id]);
   const delegations = current ? delegationsByRoom[current.id] || [] : [];
   // Always resolves by session id, never by name, so two sessions that
   // happen to share a display name (or a session that has since been
@@ -1666,7 +1690,19 @@ export default function App() {
                     LOCAL
                   </span>
                 </div>
-                <div className="activity-list">
+                <div
+                  className="activity-list"
+                  ref={activityList}
+                  onScroll={(e) => {
+                    // Scroll events from our own auto-scroll can arrive after newer
+                    // items rendered; only a scroll *up* by the user unpins.
+                    const el = e.currentTarget;
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24)
+                      activityPinned.current = true;
+                    else if (el.scrollTop < activityAutoTop.current - 2)
+                      activityPinned.current = false;
+                  }}
+                >
                   {activity.length ? (
                     activity.map((item) => (
                       <div key={item.id} className={'activity-item ' + item.kind}>
