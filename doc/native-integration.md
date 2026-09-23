@@ -34,10 +34,10 @@ Installed help verified `codex exec --json`, `--output-schema <file>`, `-o <file
 
 ```sh
 codex exec --json -C "$PROJECT_DIR" \
-  -c 'mcp_servers.agent_rooms.command="/absolute/path/to/agent-rooms-mcp"' \
-  -c 'mcp_servers.agent_rooms.args=["--stdio"]' \
-  -c 'mcp_servers.agent_rooms.env={ROOM_ID="<opaque-room-id>",SESSION_ID="<source-session-id>"}' \
-  -c 'mcp_servers.agent_rooms.required=true' \
+  -c 'mcp_servers.alfred_room.command="/absolute/path/to/alfred-room-mcp"' \
+  -c 'mcp_servers.alfred_room.args=["--stdio"]' \
+  -c 'mcp_servers.alfred_room.env={ROOM_ID="<opaque-room-id>",SESSION_ID="<source-session-id>"}' \
+  -c 'mcp_servers.alfred_room.required=true' \
   '<exact task and explicitly authorized context>'
 ```
 
@@ -50,7 +50,7 @@ codex mcp list \
   -c 'mcp_servers.agent_rooms.env={ROOMS_TEST="ok"}'
 ```
 
-The output contained `agent_rooms /usr/bin/false --stdio ROOMS_TEST=***** ... enabled Unsupported`. In this listing, `Unsupported` is an authentication/status column value for the configured stdio server; it is not evidence that `/usr/bin/false` was run or rejected. The dummy process was not run. This verifies configuration parsing and listing only, not MCP server startup, tool discovery/calling under `codex exec`, or provider authentication; those need a user-authorized authenticated smoke.
+The output contained `agent_rooms /usr/bin/false --stdio ROOMS_TEST=***** ... enabled Unsupported` (this probe predates the 2026-09-22 rename and used the server key `agent_rooms`; the runner's own bridge server name is now `alfred_room_<session id>`, see decisions.md). In this listing, `Unsupported` is an authentication/status column value for the configured stdio server; it is not evidence that `/usr/bin/false` was run or rejected. The dummy process was not run. This verifies configuration parsing and listing only, not MCP server startup, tool discovery/calling under `codex exec`, or provider authentication; those need a user-authorized authenticated smoke.
 
 `codex exec --json` writes a JSONL event stream. Official examples include `thread.started` with `thread_id`, `turn.started`, `item.started`/`item.completed`, and `turn.completed` with usage. The documented type family also includes `turn.failed`, `item.*`, and `error`; item types include MCP tool calls. Store `thread_id` from `thread.started`; don't guess it from output. Treat `turn.completed`/`turn.failed` as terminal for the turn and check process exit/error too. `--output-schema` shapes a final response; `-o` writes final text separately while events still go to stdout.
 
@@ -62,7 +62,7 @@ Researched and live-tested 2026-09-22 against `cursor-agent` 2026.09.18-9a7762b.
 
 ```sh
 cursor-agent -p --output-format stream-json --stream-partial-output \
-  --plugin-dir "$TMP/agent-rooms" [--resume "$CHAT_ID"] -- '<exact task>'
+  --plugin-dir "$TMP/alfred" [--resume "$CHAT_ID"] -- '<exact task>'
 ```
 
 - **PTY.** The PTY path launches `cursor-agent` with no arguments; its interactive trust and approval prompts are the user's.

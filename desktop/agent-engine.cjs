@@ -12,6 +12,17 @@ const PROVIDERS = ['claude', 'codex', 'cursor'];
 const PROVIDER_LABELS = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
 const MAX_DENIAL_TEXT = 300;
 
+// Provider-reported usage only (never estimated by Alfred). All fields optional; each present one must be a
+// finite non-negative number.
+function validUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false;
+  const { costUsd, inputTokens, outputTokens, ...rest } = usage;
+  if (Object.keys(rest).length) return false;
+  for (const value of [costUsd, inputTokens, outputTokens])
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) return false;
+  return costUsd !== undefined || inputTokens !== undefined || outputTokens !== undefined;
+}
+
 function nonempty(value, label, max = MAX_TEXT) {
   if (typeof value !== 'string' || !value.length || value.length > max || value.includes('\0'))
     throw new TypeError(`Invalid ${label}`);
@@ -158,9 +169,13 @@ class AgentEngine {
       if (task.controller.signal.aborted) throw task.controller.signal.reason || new Error('Agent task cancelled');
       if (!result || typeof result.text !== 'string' || !result.providerSessionId)
         throw new Error('Provider did not return a complete structured result');
+      const usage = validUsage(result.usage) ? result.usage : undefined;
       session.providerSessionId = result.providerSessionId;
       this.finish(task, null, result.text);
-      this.emit({ type: 'task-completed', sessionId: session.id, roomId: session.roomId, taskId: task.id, text: result.text });
+      // usage is included only when the provider actually reported it (see agent-runner.cjs usageFrom); never estimated.
+      const completed = { type: 'task-completed', sessionId: session.id, roomId: session.roomId, taskId: task.id, text: result.text };
+      if (usage) completed.usage = usage;
+      this.emit(completed);
     } catch (error) {
       if (task.settled) return;
       this.finish(task, error);
@@ -236,7 +251,11 @@ class AgentEngine {
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new TypeError('Invalid tool arguments');
     const taskText = nonempty(args.task, 'task text');
     const context = args.context === undefined ? undefined : nonempty(args.context, 'context');
-    const delivered = `From room agent ${source.name} (${source.id}), task ${source.active.id}.\n\nTask:\n${taskText}` +
+    // Fixed deterministic line, part of the delivery envelope (see decisions.md): tells the receiving agent
+    // its plain final answer is how it replies, since it has no other channel back to the sender. Task/context
+    // text itself is never rewritten.
+    const delivered = `From room agent ${source.name} (${source.id}), task ${source.active.id}.\n` +
+      `Reply with your result as your final answer; it is returned to the sender automatically.\n\nTask:\n${taskText}` +
       (context === undefined ? '' : `\n\nContext:\n${context}`);
     nonempty(delivered, 'combined task and context');
     const nextDepth = source.active.depth + 1;

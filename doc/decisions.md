@@ -47,7 +47,37 @@ Decided 2026-09-22 after reading Cursor CLI 2026.09.18-9a7762b help and docs and
 
 The owner named the product **Alfred** and set its license to **Apache-2.0** (LICENSE already present in the repo). This supersedes the earlier constraint in AGENTS.md against choosing a name or claiming a license. User-visible branding (window title, sidebar logo, HTML title, `package.json` name/productName/description/license, activity/policy copy, the MCP server name reported by `room-mcp-bridge.mjs`, and docs) was updated to Alfred. "Rooms" remains the in-product concept — Alfred has rooms.
 
-Kept unchanged, deliberately: IPC channel names (`rooms:*`), env var names (`AGENT_ROOMS_*`, including the `x-agent-rooms-token` bridge header), the MCP tool names `room_send`/`room_spawn`, and the Cursor plugin folder/server name `agent-rooms` (so the tool id `plugin-agent-rooms-agent_rooms-room_send` recorded in adapters.md is still accurate and did not need updating). Only the MCP server's own reported `name` field in `room-mcp-bridge.mjs` (as seen via `initialize`/tools metadata, not the Cursor plugin id) changed to `alfred`.
+Kept unchanged at the time: IPC channel names (`rooms:*`), env var names (`AGENT_ROOMS_*`, including the `x-agent-rooms-token` bridge header), and the MCP tool names `room_send`/`room_spawn`. The Cursor plugin folder/server name was initially left as `agent-rooms`; see the entry below for why that changed.
+
+### Cursor/Claude/Codex bridge naming renamed to Alfred (owner decision, 2026-09-22, supersedes the note above)
+
+A live Claude→Cursor `room_send` demo showed the target agent describing the tool by its exposed name, e.g. "check the agent-rooms workflow" — the old product name leaking through the tool surface into model-visible text, confusing about what "agent-rooms" is since the product is Alfred. This is the reason to finish the rename that the product-naming decision above deliberately deferred.
+
+Renamed:
+- Cursor plugin folder/basename `agent-rooms` → `alfred`, and its `.cursor-plugin/plugin.json` `name` → `alfred`.
+- Cursor plugin's MCP server key `agent_rooms` → `alfred_room`. The resulting Cursor tool id is now `plugin-alfred-alfred_room-room_send` (previously `plugin-agent-rooms-agent_rooms-room_send`).
+- Claude/Codex per-process bridge server name prefix `agent_rooms_<session id>` → `alfred_room_<session id>` (`desktop/agent-runner.cjs` `bridgeName`). This changes the derived strings the runner already builds dynamically: Claude's `--allowedTools mcp__alfred_room_<id>__room_send[,room_spawn]`, and Codex's `mcp_servers.alfred_room_<id>.*` overrides (`enabled_tools`, `approval_mode`, `tool_timeout_sec`, `required`).
+
+Still fixed and deterministic across resume, as required by the earlier naming decision — only the literal string changed, not the mechanism: the same session always regenerates the same bridge/plugin name, so a user-owned allow rule naming that tool id keeps working across `--resume`.
+
+Deliberately unchanged by this rename: IPC channel names (`rooms:*`), env var names (`AGENT_ROOMS_*`, including the `x-agent-rooms-token` bridge header — these are internal process plumbing, never shown to a model or the user), and the MCP tool names `room_send`/`room_spawn` themselves.
+
+`doc/adapters.md`'s 2026-09-22 live-verification sections were captured under the old `agent-rooms`/`agent_rooms` naming; they are left as an accurate historical record of what ran, with a note added at each affected point that the naming has since changed. `doc/native-integration.md`'s Codex/Cursor example commands were updated to the new names since they are prescriptive, not a record of a specific run.
+
+### Delivery envelope: fixed reply-instruction line (owner decision, 2026-09-22)
+
+Same live demo: Cursor, on receiving a delegated task, tried calling `room_send` itself to reply back to the sender, and Cursor's own permission mode denied it — the delegated agent had no channel back except its own final answer, but nothing told it so.
+
+`AgentEngine.toolCall` (`desktop/agent-engine.cjs`) now appends one fixed, deterministic line to the provenance header of every delivered `room_send`/`room_spawn` task, between the "From room agent …" line and "Task:": `Reply with your result as your final answer; it is returned to the sender automatically.` This is part of the delivery envelope, not task or context content — the task text and context the user/agent authorized are still passed verbatim and unrewritten. The same fixed line is used for every delivery; it is not tailored per provider or per task.
+
+### Provider-reported usage on task-completed (owner decision, 2026-09-22)
+
+`desktop/agent-runner.cjs` now captures usage only when a provider actually reports it in a documented event, never estimated or derived:
+- **Claude:** the `result` event's `total_cost_usd` and `usage.input_tokens`/`usage.output_tokens`. `total_cost_usd`'s exact accounting on a resumed session (whether it is cumulative for the whole session or just the latest turn) is undocumented and was only observed for a single, non-resumed turn; it is passed through as-is with no attempt to adjust it.
+- **Codex:** `turn.completed.usage.input_tokens`/`.output_tokens` (Codex's `TurnCompletedEvent.usage` also carries `cached_input_tokens`, `cache_write_input_tokens`, and `reasoning_output_tokens`, which are not surfaced). Codex reports no cost.
+- **Cursor:** the `result` event's `usage.inputTokens`/`usage.outputTokens` (it also carries `cacheReadTokens`/`cacheWriteTokens`, not surfaced). Cursor reports no cost.
+
+The runner's resolved result gains an optional `usage: { costUsd?, inputTokens?, outputTokens? }`, included only when at least one field was reported. `AgentEngine.pump` validates that shape (`validUsage`) before forwarding it, and includes `usage` on the `task-completed` event only when present — a malformed or out-of-range value from the runner is dropped rather than trusted. The bridge/delegation path (`room_send`/`room_spawn`) does not surface usage to the calling agent; it is an engine event only, for the room UI.
 
 Electron derives the default userData directory from the app name; adding `productName: "Alfred"` moves that directory. `desktop/main.cjs` now migrates `project-state.json` from the previous `agent-rooms` userData directory into the new one on first launch when the new directory has no saved state yet, so existing rooms are not lost. Covered by backend tests in `tests/backend.test.cjs`.
 

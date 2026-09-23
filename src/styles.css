@@ -477,6 +477,11 @@ button {
   margin-left: 11px;
   letter-spacing: 0;
 }
+.section-title-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .add-wrap {
   position: relative;
 }
@@ -641,10 +646,76 @@ button {
   flex: 1;
   min-height: 0;
 }
+/* Explicit column count (1/2/3): grid-template-columns is set inline from the
+   room's column weights, with a fixed-width handle track between each pair of
+   panes. Always percentage/fr based, so it can never push past the container
+   even at the 860px minimum window width. */
+.terminal-stack-columns {
+  grid-auto-rows: minmax(190px, 1fr);
+}
+.column-handle {
+  cursor: col-resize;
+  background: #262330;
+  border-radius: 3px;
+  position: relative;
+  min-height: 60px;
+}
+.column-handle:hover,
+.column-handle:focus-visible {
+  background: #453b5c;
+  outline: none;
+}
+.column-handle::after {
+  content: '';
+  position: absolute;
+  top: 40%;
+  bottom: 40%;
+  left: 2px;
+  right: 2px;
+  background: #6f6478;
+  border-radius: 2px;
+}
+.layout-columns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #3a3542;
+  border-radius: 7px;
+  padding: 3px;
+  margin-right: 10px;
+}
+.layout-columns-label {
+  font: 8px 'DM Mono', monospace;
+  color: #857f91;
+  letter-spacing: 0.5px;
+  padding: 0 4px 0 3px;
+}
+.layout-columns button {
+  border: 0;
+  background: none;
+  border-radius: 5px;
+  padding: 4px 8px;
+  font: 10px 'DM Mono', monospace;
+  color: #9a93a6;
+}
+.layout-columns button:hover {
+  color: #e3dcf2;
+}
+.layout-columns button.active {
+  background: #3a3245;
+  color: #eee6fb;
+}
 .terminal-card {
   min-height: 190px;
   height: calc((100% - 13px) / 2);
   flex: 1 0 205px;
+  /* A CSS Grid item's default min-width is "auto" (its content's min-content
+     size), which can silently override a `minmax(0, …fr)` track and force a
+     column wider than its weight — the root cause of panes overlapping when
+     a column got dragged narrow. min-width: 0 here (and on .pane-anchor,
+     which is the actual grid item) removes that, so the track width from
+     buildColumnTemplate is always what's actually rendered. */
+  min-width: 0;
   border: 1px solid #302e37;
   border-radius: 8px;
   overflow: hidden;
@@ -656,6 +727,7 @@ button {
 .terminal-head {
   height: 35px;
   flex: 0 0 35px;
+  min-width: 0;
   border-bottom: 1px solid #28262e;
   display: flex;
   align-items: center;
@@ -668,6 +740,7 @@ button {
   height: 19px;
   width: 19px;
   font-size: 10px;
+  flex: 0 0 auto;
 }
 .terminal-head b {
   font-size: 10px;
@@ -683,6 +756,7 @@ button {
   display: flex;
   align-items: center;
   gap: 5px;
+  flex: 0 0 auto;
 }
 .run-state i {
   height: 5px;
@@ -728,6 +802,7 @@ button {
   font-size: 17px;
   line-height: 1;
   padding: 2px 3px;
+  flex: 0 0 auto;
 }
 .icon-button:hover {
   color: #e3b0a8;
@@ -1038,6 +1113,10 @@ button {
   display: flex;
   flex: 1 0 205px;
   min-height: 190px;
+  /* The actual CSS Grid item (see the note on .terminal-card): without this,
+     its default auto min-width can override the weight-based column track
+     and push panes wide enough to overlap their neighbor. */
+  min-width: 0;
 }
 .pane-anchor .terminal-card {
   height: auto;
@@ -1326,6 +1405,99 @@ button {
 }
 .transcript-entry.delegation span {
   color: #93a8e0;
+}
+.transcript-entry.usage {
+  border-color: #4a4658;
+  padding-top: 0;
+}
+.transcript-entry.usage p {
+  color: #8f8a9c;
+  font-size: 9px;
+  margin-top: 2px;
+}
+.usage-total-badge {
+  color: #8f8a9c;
+  font-size: 9px;
+  border: 1px solid #3a3542;
+  border-radius: 3px;
+  padding: 1px 5px;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+/* Minimal safe Markdown for agent transcript text: rendered as React elements
+   (never dangerouslySetInnerHTML), so raw HTML/script text is always inert. */
+.md {
+  color: #d4ceda;
+  font:
+    11px/1.55 'DM Mono',
+    monospace;
+  max-width: 100%;
+}
+.md-p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.md-p:first-child {
+  margin-top: 0;
+}
+.md-heading {
+  margin: 10px 0 4px;
+  font-weight: 600;
+  color: #eee8f5;
+  overflow-wrap: anywhere;
+}
+.md-heading:first-child {
+  margin-top: 0;
+}
+.md h1.md-heading {
+  font-size: 14px;
+}
+.md h2.md-heading {
+  font-size: 13px;
+}
+.md h3.md-heading,
+.md h4.md-heading,
+.md h5.md-heading,
+.md h6.md-heading {
+  font-size: 12px;
+}
+.md-list {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+.md-list li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+.md-code {
+  background: #221f29;
+  border: 1px solid #3a3542;
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: #c3b3f2;
+  font-size: 10px;
+}
+.md-pre {
+  background: #17151c;
+  border: 1px solid #322e3b;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.md-pre code {
+  color: #d9d2e6;
+  font-size: 10px;
+  white-space: pre;
+}
+.md-link {
+  text-decoration: underline dotted;
+  text-decoration-color: #6f6478;
+  color: #b6a4e8;
+  cursor: default;
 }
 
 /* Delegation view: only renders relationships an actual delegation event

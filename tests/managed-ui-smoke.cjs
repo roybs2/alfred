@@ -18,6 +18,54 @@ const path = require('node:path');
     });
     const page = await app.firstWindow();
     await page.waitForFunction(() => !!window.rooms?.onAgentEvent);
+    // Asserts that every pair of visible session panes has non-intersecting
+    // bounding rects, and that each pane's status pill and close button stay
+    // fully inside its own pane — the concrete guarantee that a narrow/
+    // dragged/degraded column layout never overlaps or hides pane controls.
+    const assertPanesDontOverlap = async (message) => {
+      const report = await page.evaluate(() => {
+        const panes = Array.from(document.querySelectorAll('.pane-anchor:not(.pane-hidden)')).filter(
+          (el) => el.getBoundingClientRect().width > 0,
+        );
+        const rectOf = (el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, right: r.right, bottom: r.bottom };
+        };
+        const within = (outer, inner) =>
+          !inner ||
+          (inner.x >= outer.x - 0.5 &&
+            inner.right <= outer.right + 0.5 &&
+            inner.y >= outer.y - 0.5 &&
+            inner.bottom <= outer.bottom + 0.5);
+        const intersects = (a, b) => a.x < b.right && a.right > b.x && a.y < b.bottom && a.bottom > b.y;
+        const entries = panes.map((el) => ({
+          id: el.id,
+          rect: rectOf(el),
+          status: el.querySelector('.run-state') ? rectOf(el.querySelector('.run-state')) : null,
+          close: el.querySelector('.close-pane') ? rectOf(el.querySelector('.close-pane')) : null,
+        }));
+        const overlaps = [];
+        for (let i = 0; i < entries.length; i++)
+          for (let j = i + 1; j < entries.length; j++)
+            if (intersects(entries[i].rect, entries[j].rect)) overlaps.push([entries[i].id, entries[j].id]);
+        const outOfBounds = entries
+          .filter((e) => !within(e.rect, e.status) || !within(e.rect, e.close))
+          .map((e) => e.id);
+        return { overlaps, outOfBounds };
+      });
+      assert.equal(
+        report.overlaps.length,
+        0,
+        message + ': panes must never overlap, got ' + JSON.stringify(report.overlaps),
+      );
+      assert.equal(
+        report.outOfBounds.length,
+        0,
+        message +
+          ": each pane's status and close button must stay inside its own pane, violated by " +
+          JSON.stringify(report.outOfBounds),
+      );
+    };
     await app.evaluate(({ dialog }, cwd) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [cwd] });
     }, process.cwd());
@@ -242,6 +290,63 @@ const path = require('node:path');
     await resumed.getByText('Resumed after denial').waitFor();
     assert.equal(await resumed.evaluate((el) => el.textContent), 'Resumed after denial');
 
+    // Markdown in agent output: bold/italic/inline code/code block/list/heading/
+    // link render as real elements, but a <script>/<img onerror> in the same
+    // text must stay inert plain text — never dangerouslySetInnerHTML.
+    const mdText =
+      '## Heading\n\n' +
+      'Some **bold** and *italic* and `inline code` text.\n\n' +
+      '- item one\n- item two\n\n' +
+      '```\ncode block line\n```\n\n' +
+      '[a link](https://example.com/x) plus <script>window.__xssFired = true</script> ' +
+      'and <img src=x onerror="window.__xssFired = true">';
+    await send({
+      type: 'output',
+      sessionId: child.id,
+      roomId,
+      taskId: 'markdown-task',
+      text: mdText,
+    });
+    const mdEntry = page.locator('#pane-synthetic-child .transcript-entry.agent').last();
+    await mdEntry.locator('.md h2', { hasText: 'Heading' }).waitFor();
+    await mdEntry.locator('.md strong', { hasText: 'bold' }).waitFor();
+    await mdEntry.locator('.md em', { hasText: 'italic' }).waitFor();
+    await mdEntry.locator('.md-code', { hasText: 'inline code' }).waitFor();
+    await mdEntry.locator('.md-pre code', { hasText: 'code block line' }).waitFor();
+    assert.equal(await mdEntry.locator('.md-list li').count(), 2, 'List items render as list items');
+    const mdLink = mdEntry.locator('.md-link', { hasText: 'a link' });
+    await mdLink.waitFor();
+    assert.equal(
+      await mdLink.getAttribute('title'),
+      'https://example.com/x',
+      'The URL is only ever shown as text (tooltip), never navigated',
+    );
+    assert.equal(
+      await mdEntry.locator('a').count(),
+      0,
+      'Markdown links must never render as a navigable <a>',
+    );
+    assert.equal(
+      await mdEntry.locator('script').count(),
+      0,
+      'A <script> in agent text must never become a real <script> element',
+    );
+    assert.equal(
+      await mdEntry.locator('img').count(),
+      0,
+      'An <img onerror=...> in agent text must never become a real <img> element',
+    );
+    assert.equal(
+      await page.evaluate(() => window.__xssFired),
+      undefined,
+      'A <script>/<img onerror> in agent text must never execute',
+    );
+    const mdRawText = await mdEntry.evaluate((el) => el.textContent || '');
+    assert.ok(
+      mdRawText.includes('<script>') && mdRawText.includes('<img'),
+      'The raw tag text must still be visible as inert plain text',
+    );
+
     // A Cursor managed session, so a Cursor-specific permission denial also
     // renders with a real "Cursor" label/icon (never a hardcoded two-provider
     // assumption) and is attributed correctly.
@@ -266,6 +371,77 @@ const path = require('node:path');
           'Permission denied by Cursor: room_send: User rejected MCP: room_send. Provider permissions were not bypassed.',
       })
       .waitFor();
+
+    // Usage: only ever shown when the provider actually reported it on
+    // task-completed (never estimated), subtly under the completed task, with
+    // a per-session running total in the pane header tooltip, labeled by
+    // provider. Codex here reports tokens only (no cost), matching the real
+    // backend behavior for that provider.
+    await send({
+      type: 'task-completed',
+      sessionId: child.id,
+      roomId,
+      taskId: 'usage-task-1',
+      usage: { inputTokens: 1200, outputTokens: 300 },
+    });
+    await page
+      .locator('#pane-synthetic-child .transcript-entry.usage p', {
+        hasText: '1.2k in / 300 out · reported by Codex',
+      })
+      .waitFor();
+    const childBadge = page.locator('#pane-synthetic-child .usage-total-badge');
+    await childBadge.waitFor();
+    assert.equal(
+      await childBadge.getAttribute('title'),
+      'Session total (reported by Codex): 1.2k in / 300 out',
+    );
+    // A second completed task with usage accumulates into the running total.
+    await send({
+      type: 'task-completed',
+      sessionId: child.id,
+      roomId,
+      taskId: 'usage-task-2',
+      usage: { inputTokens: 800, outputTokens: 200 },
+    });
+    await page.waitForFunction(() => {
+      const title = document
+        .querySelector('#pane-synthetic-child .usage-total-badge')
+        ?.getAttribute('title');
+      return title === 'Session total (reported by Codex): 2k in / 500 out';
+    });
+
+    // A provider that reports cost too (Claude), formatted as in the spec example.
+    await send({
+      type: 'task-completed',
+      sessionId: reviewer.id,
+      roomId,
+      taskId: 'usage-task-claude-1',
+      usage: { costUsd: 0.14, inputTokens: 1200, outputTokens: 300 },
+    });
+    await page
+      .locator('#pane-synthetic-reviewer .transcript-entry.usage p', {
+        hasText: '$0.14 · 1.2k in / 300 out · reported by Claude Code',
+      })
+      .waitFor();
+    const reviewerBadge = page.locator('#pane-synthetic-reviewer .usage-total-badge');
+    await reviewerBadge.waitFor();
+    assert.equal(
+      await reviewerBadge.getAttribute('title'),
+      'Session total (reported by Claude Code): $0.14 · 1.2k in / 300 out',
+    );
+
+    // No usage field on the event: nothing is shown, never estimated.
+    await send({ type: 'task-completed', sessionId: cursorAgent.id, roomId, taskId: 'no-usage-task' });
+    assert.equal(
+      await page.locator('#pane-synthetic-cursor .usage-total-badge').count(),
+      0,
+      'No usage total badge when the provider never reported usage',
+    );
+    assert.equal(
+      await page.locator('#pane-synthetic-cursor .transcript-entry.usage').count(),
+      0,
+      'No usage transcript line when the provider never reported usage',
+    );
 
     // Rename: managed session, inline from the pane header, Enter to save.
     await page.locator('#pane-synthetic-child .pane-name').dblclick();
@@ -326,6 +502,175 @@ const path = require('node:path');
     await terminalCard.locator('.pane-name', { hasText: 'Scratch shell' }).waitFor();
     await page.getByRole('button', { name: 'Focus Scratch shell session' }).waitFor();
 
+    // Resizable split panes + column layout control. Session order at this
+    // point is: Codex lead (child), Claude reviewer, Cursor helper, Scratch
+    // shell (terminal) — round-robin into columns means col0 gets rows 1,2
+    // (child, cursor) and col1 gets rows 1,2 (reviewer, terminal).
+    await page.getByRole('button', { name: 'Columns: 2' }).click();
+    await page.waitForFunction(() => {
+      const stack = document.querySelector('.terminal-stack');
+      // Two data columns plus one fixed-width handle track between them.
+      return (
+        !!stack && getComputedStyle(stack).gridTemplateColumns.trim().split(/\s+/).length === 3
+      );
+    });
+    const box = (id) => page.locator('#pane-' + id).boundingBox();
+    let childBox = await box('synthetic-child');
+    let reviewerBox = await box('synthetic-reviewer');
+    let cursorBox = await box('synthetic-cursor');
+    assert.ok(
+      childBox.x < reviewerBox.x,
+      'First two sessions land in different columns at Columns: 2',
+    );
+    assert.ok(
+      Math.abs(childBox.x - cursorBox.x) < 2,
+      'The third session wraps back into the first column',
+    );
+    assert.ok(
+      cursorBox.y > childBox.y,
+      'The third session stacks below the first session in its column',
+    );
+
+    // Dragging the handle right widens the left column and narrows the right one.
+    const handle = page.locator('.column-handle').first();
+    await handle.waitFor();
+    const handleBox = await handle.boundingBox();
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handleBox.x + 120, handleBox.y + handleBox.height / 2, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    const widenedChildBox = await box('synthetic-child');
+    const shrunkReviewerBox = await box('synthetic-reviewer');
+    assert.ok(
+      widenedChildBox.width > childBox.width,
+      'Dragging the handle right widens the left column',
+    );
+    assert.ok(
+      shrunkReviewerBox.width < reviewerBox.width,
+      'Dragging the handle right narrows the right column',
+    );
+    await assertPanesDontOverlap('After a normal drag at Columns: 2');
+
+    // An aggressive drag to the extreme (far past any reasonable column width)
+    // must clamp at a safe minimum instead of ever overlapping the next pane
+    // or hiding its status/close controls.
+    const extremeHandleBox = await handle.boundingBox();
+    await page.mouse.move(
+      extremeHandleBox.x + extremeHandleBox.width / 2,
+      extremeHandleBox.y + extremeHandleBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(extremeHandleBox.x + 4000, extremeHandleBox.y + extremeHandleBox.height / 2, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    await assertPanesDontOverlap('After dragging a handle to the extreme');
+    const extremeReviewerBox = await box('synthetic-reviewer');
+    assert.ok(
+      extremeReviewerBox.width >= 200,
+      `The narrowed column must clamp at a content-safe minimum, got ${extremeReviewerBox.width}px`,
+    );
+    // Same check in the opposite direction, so both sides of the clamp are covered.
+    await page.mouse.move(
+      (await handle.boundingBox()).x + extremeHandleBox.width / 2,
+      extremeHandleBox.y + extremeHandleBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(extremeHandleBox.x - 4000, extremeHandleBox.y + extremeHandleBox.height / 2, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    await assertPanesDontOverlap('After dragging a handle to the opposite extreme');
+    const extremeChildBox = await box('synthetic-child');
+    assert.ok(
+      extremeChildBox.width >= 200,
+      `The narrowed column must clamp at a content-safe minimum, got ${extremeChildBox.width}px`,
+    );
+
+    // Restore a normal split before the keyboard/double-click checks below.
+    await handle.dblclick();
+    await page.waitForTimeout(100);
+
+    // Keyboard-accessible: focused handle, arrow keys resize.
+    await handle.focus();
+    const beforeArrowWidth = (await box('synthetic-child')).width;
+    await page.keyboard.press('ArrowLeft');
+    await page.waitForFunction((prevWidth) => {
+      const el = document.querySelector('#pane-synthetic-child');
+      return !!el && Math.abs(el.getBoundingClientRect().width - prevWidth) > 1;
+    }, beforeArrowWidth);
+
+    // Double-click resets that pair of columns back to an equal split.
+    await handle.dblclick();
+    await page.waitForFunction(() => {
+      const a = document.querySelector('#pane-synthetic-child')?.getBoundingClientRect().width;
+      const b = document.querySelector('#pane-synthetic-reviewer')?.getBoundingClientRect().width;
+      return !!a && !!b && Math.abs(a - b) < 3;
+    });
+
+    // Layout persists per room as UI metadata only — never transcripts.
+    await page.waitForFunction(async (id) => {
+      const state = await window.rooms.loadState();
+      const room = (state.rooms || []).find((r) => r.id === id);
+      return (
+        room?.columns === 2 &&
+        Array.isArray(room.columnWeights) &&
+        room.columnWeights.length === 2
+      );
+    }, roomId);
+
+    // Columns: 3 lays out three data columns with two handles when the window
+    // is wide enough for each to keep a content-safe minimum width, still
+    // contained (no page-level horizontal scroll), and never overlapping.
+    // Widen the window first so three real columns actually fit — the default
+    // 1280px window's content area (~716px) is not wide enough for three
+    // managed-agent panes (with a usage badge) to each stay above the
+    // content-safe minimum, and correctly degrades to two (checked below).
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].setSize(1680, 900);
+    });
+    await page.waitForTimeout(150);
+    await page.getByRole('button', { name: 'Columns: 3' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.column-handle').length === 2);
+    assert.ok(
+      (await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)),
+      'Three-column layout must not cause page-level horizontal scroll',
+    );
+    await assertPanesDontOverlap('At Columns: 3 with room to spare');
+
+    // The 3-column *setting* must also stay contained — and, above all, never
+    // overlap — at the app's minimum window width. Three real columns cannot
+    // each fit a content-safe minimum width there, so the app must fall back
+    // to fewer effective columns (or none/one) rather than ever overlap panes
+    // or clip a pane's status/close controls.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].setSize(860, 700);
+    });
+    await page.waitForTimeout(150);
+    assert.ok(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      'Three-column layout must stay contained at the 860px minimum window width',
+    );
+    await assertPanesDontOverlap('At Columns: 3, 860px minimum window width');
+    const handlesAt860 = await page.locator('.column-handle').count();
+    assert.ok(
+      handlesAt860 < 2,
+      'At 860px, three real columns cannot fit a content-safe minimum width, so the layout ' +
+        'must fall back to fewer columns (fewer handles) instead of ever overlapping panes',
+    );
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].setSize(1280, 820);
+    });
+    await page.waitForTimeout(150);
+    await assertPanesDontOverlap('Back at a comfortable window width');
+
+    // Auto keeps the original responsive wrapping grid, with no handles.
+    await page.getByRole('button', { name: 'Columns: auto' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.column-handle').length === 0);
+
     // Keyboard nav: arrow keys move roving focus across the session list.
     const firstRow = page.locator('.session-row').first();
     await firstRow.focus();
@@ -361,7 +706,7 @@ const path = require('node:path');
     await page.screenshot({ path: 'doc/screenshots/activity-panel-860.png' });
 
     console.log(
-      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), and layout at the minimum window width.',
+      'PASS: synthetic managed-agent child session, lifecycle, transcript, activity, room policy UI, nested delegation view (by id, with provider), permission-denied warnings (incl. Cursor), rename (incl. blocked duplicate), safe Markdown transcript rendering (incl. inert script/img), provider-reported usage display and running totals, resizable/keyboard-accessible column layout with persistence, and layout at the minimum window width.',
     );
   } finally {
     if (app) await app.close();

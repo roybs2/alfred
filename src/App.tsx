@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -17,6 +25,10 @@ type TerminalSession = {
   status: 'running' | 'exited';
   exitCode?: number;
 };
+// Usage the provider itself reported for a task, never estimated locally.
+// Every field is optional and only ever set from a real `usage` payload on a
+// task-completed event.
+type Usage = { costUsd?: number; inputTokens?: number; outputTokens?: number };
 type ManagedSession = {
   id: string;
   kind: 'managed';
@@ -26,15 +38,21 @@ type ManagedSession = {
   transcript: {
     id: string;
     taskId?: string;
-    role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation';
+    role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation' | 'usage';
     text: string;
     // Delegation entries only: the live target session id, so the line can always be
     // rendered with current names (session.name for the source, this id for the target)
     // instead of the names frozen into `text` when the delegation event fired.
     targetSessionId?: string;
   }[];
+  // Running sum of every task-completed usage this session has reported, field by
+  // field (a field stays unset until the provider actually reports it once).
+  usageTotal?: Usage;
 };
 type Session = TerminalSession | ManagedSession;
+// Pane layout is UI metadata only (which never includes transcripts): how many
+// columns the session panes are split into, and the relative width of each one.
+type ColumnCount = 1 | 2 | 3;
 type Room = {
   id: string;
   name: string;
@@ -44,6 +62,9 @@ type Room = {
   allowSpawn: boolean;
   maxAgents: number;
   preapproveRoomTools: boolean;
+  columns: ColumnCount | 'auto';
+  // Relative widths (fr units), one per column, only meaningful when columns !== 'auto'.
+  columnWeights: number[];
 };
 type AgentEvent = {
   type:
@@ -63,6 +84,8 @@ type AgentEvent = {
   name?: string;
   targetSessionId?: string;
   targetTaskId?: string;
+  // Only ever present when the provider itself reported it on task-completed.
+  usage?: Usage;
   session?: {
     id: string;
     roomId: string;
@@ -187,12 +210,244 @@ const sessionName = (sessions: Session[], provider: Provider, kind: Session['kin
   return `${base} ${count}`;
 };
 const makeId = () => crypto.randomUUID();
+// --- Usage formatting: never estimates, only formats what the provider reported. ---
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (Math.abs(n) < 1000) return String(Math.round(n));
+  const k = n / 1000;
+  return (Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)) + 'k';
+}
+function formatCost(usd: number): string {
+  return Number.isFinite(usd) ? '$' + usd.toFixed(2) : '';
+}
+function formatUsage(usage?: Usage): string {
+  if (!usage) return '';
+  const parts: string[] = [];
+  if (typeof usage.costUsd === 'number' && Number.isFinite(usage.costUsd))
+    parts.push(formatCost(usage.costUsd));
+  const tokenParts: string[] = [];
+  if (typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens))
+    tokenParts.push(formatTokens(usage.inputTokens) + ' in');
+  if (typeof usage.outputTokens === 'number' && Number.isFinite(usage.outputTokens))
+    tokenParts.push(formatTokens(usage.outputTokens) + ' out');
+  if (tokenParts.length) parts.push(tokenParts.join(' / '));
+  return parts.join(' · ');
+}
+function accumulateUsage(prev: Usage | undefined, incoming: Usage): Usage {
+  const add = (a: number | undefined, b: number | undefined) =>
+    b === undefined ? a : (a || 0) + b;
+  return {
+    costUsd: add(prev?.costUsd, incoming.costUsd),
+    inputTokens: add(prev?.inputTokens, incoming.inputTokens),
+    outputTokens: add(prev?.outputTokens, incoming.outputTokens),
+  };
+}
+// --- Pane column layout: pure UI metadata, computed from session order. ---
+function equalColumnWeights(columns: ColumnCount): number[] {
+  return Array.from({ length: columns }, () => 100 / columns);
+}
+function isValidColumnWeights(weights: unknown, columns: ColumnCount): weights is number[] {
+  return (
+    Array.isArray(weights) &&
+    weights.length === columns &&
+    weights.every((w) => typeof w === 'number' && Number.isFinite(w) && w > 0)
+  );
+}
+// A pane's header (icon + name + MANAGED AGENT badge + usage badge + status +
+// close button) needs a real minimum width to stay legible; below this a
+// column must never be requested, in drag math or in the effective column
+// count used for rendering (see maxFittingColumns), so panes can never
+// overlap or clip each other's status/close controls.
+const MIN_PANE_COLUMN_PX = 260;
+const COLUMN_HANDLE_PX = 6;
+// `columns`/`effectiveColumns` below are always 1, 2 or 3 in practice (never
+// more than ColumnCount), but are typed as plain numbers since a degraded
+// render can use fewer than the room's configured column count.
+function buildColumnTemplate(weights: number[], columns: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < columns; i++) {
+    // minmax(0, …fr): without the explicit 0 minimum, a grid track's default
+    // min size is "auto" (its content's min-content size), which would let a
+    // wide pane (long transcript text, a fitted terminal) silently override
+    // the weight-based split. Content that doesn't fit scrolls within the pane.
+    parts.push('minmax(0, ' + Math.max(weights[i] ?? 100 / columns, 0.5).toFixed(2) + 'fr)');
+    if (i < columns - 1) parts.push(COLUMN_HANDLE_PX + 'px');
+  }
+  return parts.join(' ');
+}
+// Assigns each session a (column, row) slot, round-robin in creation order, so
+// the grid position never depends on which room is currently selected.
+function computePaneGrid(sessions: Session[], columns: number) {
+  const rowCounts = new Array(columns).fill(0);
+  const map = new Map<string, { col: number; row: number }>();
+  sessions.forEach((s, i) => {
+    const col = i % columns;
+    rowCounts[col] += 1;
+    map.set(s.id, { col, row: rowCounts[col] });
+  });
+  return map;
+}
+// The number of columns that can actually fit MIN_PANE_COLUMN_PX each at the
+// given container width, capped at the room's configured column count. This
+// is what actually gets rendered — the room's `columns` setting is only ever
+// a ceiling, never a promise, so a narrow window degrades to fewer columns
+// instead of ever overlapping panes.
+function maxFittingColumns(containerWidth: number, columns: number): number {
+  if (containerWidth <= 0) return columns;
+  for (let n = columns; n > 1; n--) {
+    const handles = (n - 1) * COLUMN_HANDLE_PX;
+    if (containerWidth - handles >= n * MIN_PANE_COLUMN_PX) return n;
+  }
+  return 1;
+}
+// --- Minimal, safe Markdown for agent transcript text only. Renders straight to
+// React elements (never dangerouslySetInnerHTML), so arbitrary text such as
+// "<script>" or "<img onerror=...>" is always inert plain text. Links are shown
+// as plain (non-clickable, non-navigating) text with the URL only in a tooltip. ---
+type MdBlock =
+  | { type: 'heading'; level: number; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'code'; text: string }
+  | { type: 'list'; ordered: boolean; items: string[] };
+function parseMarkdownBlocks(text: string): MdBlock[] {
+  const lines = text.split(/\r\n|\r|\n/);
+  const blocks: MdBlock[] = [];
+  let paraBuffer: string[] = [];
+  const flushPara = () => {
+    if (paraBuffer.length) {
+      blocks.push({ type: 'paragraph', text: paraBuffer.join('\n') });
+      paraBuffer = [];
+    }
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^```(\w*)\s*$/);
+    if (fence) {
+      flushPara();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      // Unterminated fence (mid-stream): render what has arrived so far as code
+      // rather than losing it or breaking the parse.
+      blocks.push({ type: 'code', text: codeLines.join('\n') });
+      i++;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushPara();
+      blocks.push({ type: 'heading', level: heading[1].length, text: heading[2] });
+      i++;
+      continue;
+    }
+    const listItem = line.match(/^\s*([-*]|\d+[.)])\s+(.*)$/);
+    if (listItem) {
+      flushPara();
+      const ordered = /\d/.test(listItem[1]);
+      const items = [listItem[2]];
+      i++;
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*([-*]|\d+[.)])\s+(.*)$/);
+        if (!m) break;
+        items.push(m[2]);
+        i++;
+      }
+      blocks.push({ type: 'list', ordered, items });
+      continue;
+    }
+    if (line.trim() === '') {
+      flushPara();
+      i++;
+      continue;
+    }
+    paraBuffer.push(line);
+    i++;
+  }
+  flushPara();
+  return blocks;
+}
+const mdInlineRegex =
+  /`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+function renderMarkdownInline(text: string, keyPrefix: string) {
+  const nodes: (string | JSX.Element)[] = [];
+  mdInlineRegex.lastIndex = 0;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let idx = 0;
+  while ((match = mdInlineRegex.exec(text))) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    const key = keyPrefix + '-' + idx++;
+    if (match[1] !== undefined) nodes.push(<code className="md-code" key={key}>{match[1]}</code>);
+    else if (match[2] !== undefined || match[3] !== undefined)
+      nodes.push(<strong key={key}>{match[2] ?? match[3]}</strong>);
+    else if (match[4] !== undefined || match[5] !== undefined)
+      nodes.push(<em key={key}>{match[4] ?? match[5]}</em>);
+    else if (match[6] !== undefined)
+      // No <a>: never navigates the app window. The URL is only ever visible as text.
+      nodes.push(
+        <span className="md-link" title={match[7]} key={key}>
+          {match[6]}
+        </span>,
+      );
+    last = mdInlineRegex.lastIndex;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+const mdHeadingTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const;
+function MarkdownText({ text }: { text: string }) {
+  const blocks = parseMarkdownBlocks(text);
+  return (
+    <div className="md">
+      {blocks.map((block, i) => {
+        const key = 'b' + i;
+        if (block.type === 'heading') {
+          const Tag = mdHeadingTags[Math.min(5, Math.max(0, block.level - 1))];
+          return (
+            <Tag className="md-heading" key={key}>
+              {renderMarkdownInline(block.text, key)}
+            </Tag>
+          );
+        }
+        if (block.type === 'code')
+          return (
+            <pre className="md-pre" key={key}>
+              <code>{block.text}</code>
+            </pre>
+          );
+        if (block.type === 'list') {
+          const items = block.items.map((item, j) => (
+            <li key={key + '-' + j}>{renderMarkdownInline(item, key + '-' + j)}</li>
+          ));
+          return block.ordered ? (
+            <ol className="md-list" key={key}>
+              {items}
+            </ol>
+          ) : (
+            <ul className="md-list" key={key}>
+              {items}
+            </ul>
+          );
+        }
+        return (
+          <p className="md-p" key={key}>
+            {renderMarkdownInline(block.text, key)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
 const pathName = (p: string) => p.split('/').filter(Boolean).pop() || p || 'New room';
 const terminalRegistry = new Map<string, Terminal>();
 const outputBuffers = new Map<string, string[]>();
 const appendTranscript = (
   session: ManagedSession,
-  role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation',
+  role: 'user' | 'agent' | 'system' | 'task' | 'warning' | 'delegation' | 'usage',
   text: string,
   taskId?: string,
   targetSessionId?: string,
@@ -442,6 +697,19 @@ function ManagedPane({
           </b>
         )}
         <span className="mode-tag">MANAGED AGENT</span>
+        {formatUsage(session.usageTotal) && (
+          <span
+            className="usage-total-badge"
+            title={
+              'Session total (reported by ' +
+              providerLabel(session.provider) +
+              '): ' +
+              formatUsage(session.usageTotal)
+            }
+          >
+            Σ
+          </span>
+        )}
         <span className={'run-state ' + session.status}>
           <i />
           {session.status}
@@ -470,13 +738,21 @@ function ManagedPane({
                         ? 'WARNING · ' + providerLabel(session.provider).toUpperCase()
                         : entry.role === 'delegation'
                           ? 'DELEGATION'
-                          : 'STATUS'}
+                          : entry.role === 'usage'
+                            ? ''
+                            : 'STATUS'}
               </span>
-              <p>
-                {entry.role === 'delegation' && entry.targetSessionId
-                  ? session.name + ' → ' + resolveSessionName(entry.targetSessionId)
-                  : entry.text}
-              </p>
+              {entry.role === 'agent' ? (
+                // Markdown for agent output only — the delivered-task/provenance
+                // blocks below stay plain monospace so the exact text is visible.
+                <MarkdownText text={entry.text} />
+              ) : (
+                <p>
+                  {entry.role === 'delegation' && entry.targetSessionId
+                    ? session.name + ' → ' + resolveSessionName(entry.targetSessionId)
+                    : entry.text}
+                </p>
+              )}
             </div>
           ))
         ) : (
@@ -617,6 +893,17 @@ export default function App() {
                 ? r.maxAgents
                 : 4,
             preapproveRoomTools: r.preapproveRoomTools === true,
+            columns: r.columns === 1 || r.columns === 2 || r.columns === 3 ? r.columns : 'auto',
+            columnWeights: isValidColumnWeights(
+              r.columnWeights,
+              (r.columns === 1 || r.columns === 2 || r.columns === 3 ? r.columns : 1) as ColumnCount,
+            )
+              ? r.columnWeights
+              : equalColumnWeights(
+                  (r.columns === 1 || r.columns === 2 || r.columns === 3
+                    ? r.columns
+                    : 1) as ColumnCount,
+                ),
           })) as Room[];
         const results = await Promise.allSettled(
           restored.map((room) =>
@@ -731,7 +1018,25 @@ export default function App() {
                       : { ...session, status: 'running' };
                   if (event.type === 'output' && event.text)
                     return appendTranscript(session, 'agent', event.text, event.taskId);
-                  if (event.type === 'task-completed') return { ...session, status: 'idle' };
+                  if (event.type === 'task-completed') {
+                    const idleSession: ManagedSession = { ...session, status: 'idle' };
+                    if (!event.usage) return idleSession;
+                    const withTotal: ManagedSession = {
+                      ...idleSession,
+                      usageTotal: accumulateUsage(session.usageTotal, event.usage),
+                    };
+                    const line = formatUsage(event.usage);
+                    // Never estimate: only show a usage line when the provider
+                    // actually reported at least one field on this event.
+                    return line
+                      ? appendTranscript(
+                          withTotal,
+                          'usage',
+                          line + ' · reported by ' + providerLabel(session.provider),
+                          event.taskId,
+                        )
+                      : withTotal;
+                  }
                   if (event.type === 'task-failed')
                     return appendTranscript(
                       { ...session, status: 'failed' },
@@ -823,7 +1128,7 @@ export default function App() {
   useEffect(() => {
     if (!bridge || loadingState || !canPersist.current) return;
     const metadata = rooms.map(
-      ({ id: roomId, name, cwd, createdAt, allowSpawn, maxAgents, preapproveRoomTools }) => ({
+      ({
         id: roomId,
         name,
         cwd,
@@ -831,6 +1136,18 @@ export default function App() {
         allowSpawn,
         maxAgents,
         preapproveRoomTools,
+        columns,
+        columnWeights,
+      }) => ({
+        id: roomId,
+        name,
+        cwd,
+        createdAt,
+        allowSpawn,
+        maxAgents,
+        preapproveRoomTools,
+        columns,
+        columnWeights,
       }),
     );
     const signature = JSON.stringify(metadata);
@@ -860,6 +1177,8 @@ export default function App() {
       allowSpawn: false,
       maxAgents: 4,
       preapproveRoomTools: false,
+      columns: 'auto',
+      columnWeights: [],
     };
     try {
       await bridge.setRoomPolicy({
@@ -1251,6 +1570,151 @@ export default function App() {
       setNotice('The note was not pasted. Check that the session is still running.');
     }
   }
+  // --- Pane column layout: UI metadata only (no transcripts). Weights update
+  // locally while a drag is in progress and only land in `rooms` (and so get
+  // persisted) once the drag ends, so a drag never spams saveState. ---
+  const terminalStackRef = useRef<HTMLDivElement>(null);
+  const [dragWeights, setDragWeights] = useState<number[] | null>(null);
+  const dragState = useRef<{
+    handleIndex: number;
+    startX: number;
+    startWeights: number[];
+    trackPx: number;
+  } | null>(null);
+  const setColumns = useCallback(
+    (room: Room, columns: ColumnCount | 'auto') => {
+      setRooms((prev) =>
+        prev.map((r) =>
+          r.id === room.id
+            ? {
+                ...r,
+                columns,
+                columnWeights: columns === 'auto' ? [] : equalColumnWeights(columns),
+              }
+            : r,
+        ),
+      );
+    },
+    [],
+  );
+  // Converts MIN_PANE_COLUMN_PX into weight units for the current track width,
+  // so a column's weight (and so its rendered pixel width) can never drop
+  // below what its header needs to stay legible and non-overlapping.
+  const minColumnWeight = (weights: number[], trackPx: number) => {
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    if (trackPx <= 0) return totalWeight * 0.15;
+    return (MIN_PANE_COLUMN_PX / trackPx) * totalWeight;
+  };
+  const clampWeightDelta = (weights: number[], i: number, delta: number, trackPx: number) => {
+    const min = minColumnWeight(weights, trackPx);
+    let d = delta;
+    if (weights[i] + d < min) d = min - weights[i];
+    if (weights[i + 1] - d < min) d = weights[i + 1] - min;
+    return d;
+  };
+  const commitColumnWeights = useCallback((roomId: string, weights: number[]) => {
+    setRooms((prev) =>
+      prev.map((r) => (r.id === roomId ? { ...r, columnWeights: weights } : r)),
+    );
+  }, []);
+  const onColumnHandlePointerDown = useCallback(
+    (room: Room, handleIndex: number) => (e: ReactMouseEvent) => {
+      if (room.columns === 'auto') return;
+      const track = terminalStackRef.current;
+      if (!track) return;
+      e.preventDefault();
+      const startWeights = room.columnWeights;
+      dragState.current = {
+        handleIndex,
+        startX: e.clientX,
+        startWeights,
+        trackPx: track.getBoundingClientRect().width,
+      };
+      setDragWeights(startWeights);
+      const onMove = (moveEvent: MouseEvent) => {
+        const drag = dragState.current;
+        if (!drag || drag.trackPx <= 0) return;
+        const deltaWeight =
+          ((moveEvent.clientX - drag.startX) / drag.trackPx) *
+          drag.startWeights.reduce((a, b) => a + b, 0);
+        const d = clampWeightDelta(drag.startWeights, drag.handleIndex, deltaWeight, drag.trackPx);
+        const next = [...drag.startWeights];
+        next[drag.handleIndex] += d;
+        next[drag.handleIndex + 1] -= d;
+        setDragWeights(next);
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        setDragWeights((prevWeights) => {
+          if (prevWeights) commitColumnWeights(room.id, prevWeights);
+          return null;
+        });
+        dragState.current = null;
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [commitColumnWeights],
+  );
+  const onColumnHandleKeyDown = useCallback(
+    (room: Room, handleIndex: number) => (e: ReactKeyboardEvent) => {
+      if (room.columns === 'auto') return;
+      const step = 5;
+      let delta = 0;
+      if (e.key === 'ArrowLeft') delta = -step;
+      else if (e.key === 'ArrowRight') delta = step;
+      else return;
+      e.preventDefault();
+      const weights = room.columnWeights;
+      const trackPx = terminalStackRef.current?.getBoundingClientRect().width || 0;
+      const d = clampWeightDelta(weights, handleIndex, delta, trackPx);
+      const next = [...weights];
+      next[handleIndex] += d;
+      next[handleIndex + 1] -= d;
+      commitColumnWeights(room.id, next);
+    },
+    [commitColumnWeights],
+  );
+  const onColumnHandleDoubleClick = useCallback(
+    (room: Room, handleIndex: number) => () => {
+      if (room.columns === 'auto') return;
+      const weights = room.columnWeights;
+      const trackPx = terminalStackRef.current?.getBoundingClientRect().width || 0;
+      const pair = weights[handleIndex] + weights[handleIndex + 1];
+      const min = Math.min(minColumnWeight(weights, trackPx), pair / 2);
+      const next = [...weights];
+      next[handleIndex] = Math.max(pair / 2, min);
+      next[handleIndex + 1] = pair - next[handleIndex];
+      commitColumnWeights(room.id, next);
+    },
+    [commitColumnWeights],
+  );
+  // Measured width of the pane container, kept live via ResizeObserver so a
+  // window resize (or the sidebar/activity panel changing) can immediately
+  // reduce the effective column count — never leaving stale layout that could
+  // overlap panes.
+  const [stackWidth, setStackWidth] = useState(0);
+  useEffect(() => {
+    const el = terminalStackRef.current;
+    if (!el) return;
+    setStackWidth(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (typeof width === 'number') setStackWidth(width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [current?.id, current?.columns, !!current?.sessions.length]);
+  // The room's `columns` setting is a ceiling, never a promise: at the current
+  // width, fewer columns may be all that fit without dropping any pane below
+  // MIN_PANE_COLUMN_PX. This is what's actually rendered.
+  const effectiveColumns =
+    current && current.columns !== 'auto' ? maxFittingColumns(stackWidth, current.columns) : null;
+  const currentPaneGrid =
+    current && effectiveColumns ? computePaneGrid(current.sessions, effectiveColumns) : null;
+  const effectiveColumnWeights =
+    current && effectiveColumns ? (dragWeights || current.columnWeights).slice(0, effectiveColumns) : null;
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1543,10 +2007,30 @@ export default function App() {
                       </span>
                     </h2>
                   </div>
-                  <div className="add-wrap">
-                    <button className="add-session" onClick={() => setPicker(!picker)}>
-                      <span>＋</span> Add session <span className="chevron">⌄</span>
-                    </button>
+                  <div className="section-title-right">
+                    <div
+                      className="layout-columns"
+                      role="group"
+                      aria-label="Session pane columns"
+                    >
+                      <span className="layout-columns-label">Columns</span>
+                      {([1, 2, 3, 'auto'] as const).map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          aria-pressed={current.columns === n}
+                          aria-label={'Columns: ' + n}
+                          className={current.columns === n ? 'active' : ''}
+                          onClick={() => setColumns(current, n)}
+                        >
+                          {n === 'auto' ? 'Auto' : n}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="add-wrap">
+                      <button className="add-session" onClick={() => setPicker(!picker)}>
+                        <span>＋</span> Add session <span className="chevron">⌄</span>
+                      </button>
                     {picker && (
                       <div className="picker-menu">
                         <div className="picker-group">NATIVE TERMINAL</div>
@@ -1599,18 +2083,40 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                  </div>
                 </div>
                 {rooms.some((r) => r.sessions.length > 0) && (
                   <div
-                    className="terminal-stack"
-                    style={{ display: current.sessions.length ? undefined : 'none' }}
+                    className={'terminal-stack' + (effectiveColumns ? ' terminal-stack-columns' : '')}
+                    ref={terminalStackRef}
+                    style={{
+                      display: current.sessions.length ? undefined : 'none',
+                      ...(effectiveColumns && effectiveColumnWeights
+                        ? {
+                            gridTemplateColumns: buildColumnTemplate(
+                              effectiveColumnWeights,
+                              effectiveColumns,
+                            ),
+                          }
+                        : {}),
+                    }}
                   >
                     {rooms.flatMap((room) =>
-                      room.sessions.map((session) => (
+                      room.sessions.map((session) => {
+                        const gridPos =
+                          room.id === current.id && currentPaneGrid
+                            ? currentPaneGrid.get(session.id)
+                            : undefined;
+                        return (
                         <div
                           id={'pane-' + session.id}
                           key={session.id}
                           className={'pane-anchor ' + (room.id === current.id ? '' : 'pane-hidden')}
+                          style={
+                            gridPos
+                              ? { gridColumn: gridPos.col * 2 + 1, gridRow: gridPos.row }
+                              : undefined
+                          }
                         >
                           {session.kind === 'terminal' ? (
                             <TerminalPane
@@ -1648,8 +2154,26 @@ export default function App() {
                             />
                           )}
                         </div>
-                      )),
+                        );
+                      }),
                     )}
+                    {effectiveColumns &&
+                      effectiveColumns > 1 &&
+                      current.sessions.length > 0 &&
+                      Array.from({ length: effectiveColumns - 1 }).map((_, i) => (
+                        <div
+                          key={'handle-' + i}
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label={'Resize columns ' + (i + 1) + ' and ' + (i + 2)}
+                          tabIndex={0}
+                          className="column-handle"
+                          style={{ gridColumn: (i + 1) * 2, gridRow: '1 / -1' }}
+                          onMouseDown={onColumnHandlePointerDown(current, i)}
+                          onDoubleClick={onColumnHandleDoubleClick(current, i)}
+                          onKeyDown={onColumnHandleKeyDown(current, i)}
+                        />
+                      ))}
                   </div>
                 )}
                 {!current.sessions.length && (

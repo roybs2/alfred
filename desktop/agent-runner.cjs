@@ -23,13 +23,13 @@ function denialText(tool, reason) {
 // servers. Write that plugin into a private temporary directory (never the project or ~/.cursor) and remove it
 // when the process ends. Cursor names plugin tools `plugin-<plugin dir basename>-<server>-<tool>` (observed), so
 // both names are fixed: a resumed chat sees the same tool names, and a user-owned allow rule can name them.
-const CURSOR_PLUGIN_DIR = 'agent-rooms';
-const CURSOR_SERVER = 'agent_rooms';
+const CURSOR_PLUGIN_DIR = 'alfred';
+const CURSOR_SERVER = 'alfred_room';
 function writeCursorPlugin(tempRoot, server) {
-  const parent = fs.mkdtempSync(path.join(tempRoot, 'agent-rooms-cursor-'));
+  const parent = fs.mkdtempSync(path.join(tempRoot, 'alfred-cursor-'));
   const dir = path.join(parent, CURSOR_PLUGIN_DIR);
   fs.mkdirSync(path.join(dir, '.cursor-plugin'), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(dir, '.cursor-plugin', 'plugin.json'), JSON.stringify({ name: 'agent-rooms', version: '0.1.0' }), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.cursor-plugin', 'plugin.json'), JSON.stringify({ name: CURSOR_PLUGIN_DIR, version: '0.1.0' }), { mode: 0o600 });
   fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { [CURSOR_SERVER]: server } }), { mode: 0o600 });
   return { parent, dir };
 }
@@ -56,6 +56,16 @@ function cursorRejection(toolCall) {
   return null;
 }
 
+// Provider-reported usage only; never estimated. Returns undefined when the provider reported nothing usable,
+// so the runner/engine can omit `usage` entirely rather than send a partially-fabricated object.
+function usageFrom({ costUsd, inputTokens, outputTokens } = {}) {
+  const out = {};
+  if (typeof costUsd === 'number' && Number.isFinite(costUsd)) out.costUsd = costUsd;
+  if (typeof inputTokens === 'number' && Number.isFinite(inputTokens)) out.inputTokens = inputTokens;
+  if (typeof outputTokens === 'number' && Number.isFinite(outputTokens)) out.outputTokens = outputTokens;
+  return Object.keys(out).length ? out : undefined;
+}
+
 // Codex wraps upstream API errors as a JSON string inside `message`; surface the readable inner message.
 function providerMessage(value, fallback) {
   if (typeof value !== 'string' || !value) return fallback;
@@ -74,7 +84,7 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
       const executable = executableFor(provider);
       if (!executable) throw new Error(`${provider} CLI is not installed`);
       if (!bridge) throw new Error('Room MCP bridge unavailable');
-      const bridgeName = `agent_rooms_${bridge.sessionId.replaceAll('-', '_')}`;
+      const bridgeName = `alfred_room_${bridge.sessionId.replaceAll('-', '_')}`;
       const bridgeScript = path.join(__dirname, 'room-mcp-bridge.mjs');
       // Only this room's own bridge tools, and room_spawn only when the room allows spawning.
       const roomToolNames = roomTools.allowSpawn === true ? ['room_send', 'room_spawn'] : ['room_send'];
@@ -152,6 +162,7 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
         let stderr = '';
         let sessionId = providerSessionId;
         let finalText;
+        let usage;
         let streamedText = false;
         // Text streamed in separate assistant segments (e.g. a preamble before a tool call and the answer after
         // it) arrives with no separator; mark the boundary so the display gets a paragraph break, not "back.Always".
@@ -223,6 +234,10 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
             if (item.type === 'result') {
               if (item.is_error) providerError = new Error(typeof item.result === 'string' ? item.result : 'Claude task failed');
               if (typeof item.result === 'string') finalText = item.result;
+              // total_cost_usd is reported by the `result` event; on a resumed session it may be the cumulative
+              // cost for the whole session rather than this turn alone (undocumented, observed only for a single
+              // turn so far) — surfaced as-is, never re-derived or summed by the runner.
+              usage = usageFrom({ costUsd: item.total_cost_usd, inputTokens: item.usage?.input_tokens, outputTokens: item.usage?.output_tokens });
             }
           } else if (provider === 'cursor') {
             if (typeof item.session_id === 'string' && item.session_id) sessionId = item.session_id;
@@ -245,6 +260,8 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
             if (item.type === 'result') {
               if (item.is_error) providerError = new Error(typeof item.result === 'string' && item.result ? item.result : 'Cursor task failed');
               if (typeof item.result === 'string') finalText = item.result;
+              // Cursor's `result` event reports token usage (observed: inputTokens/outputTokens) but no cost field.
+              usage = usageFrom({ inputTokens: item.usage?.inputTokens, outputTokens: item.usage?.outputTokens });
             }
           } else {
             if (item.type === 'thread.started' && item.thread_id) sessionId = item.thread_id;
@@ -254,7 +271,11 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
             }
             if (item.type === 'turn.failed' || item.type === 'error')
               providerError = new Error(providerMessage(item.error?.message || item.message, 'Codex task failed'));
-            if (item.type === 'turn.completed') turnCompleted = true;
+            if (item.type === 'turn.completed') {
+              turnCompleted = true;
+              // Codex reports no cost, only token counts, on `turn.completed.usage`.
+              usage = usageFrom({ inputTokens: item.usage?.input_tokens, outputTokens: item.usage?.output_tokens });
+            }
           }
         }
         child.stdout.on('data', (chunk) => {
@@ -288,7 +309,7 @@ function cliRunner({ executableFor, spawnProcess = spawn, bridgeExecutable = pro
           if (!sessionId || typeof finalText !== 'string') { reject(new Error(`${provider} did not return a complete structured result`)); return; }
           if (finalText.length > MAX_DISPLAY_TEXT) { reject(new Error('Provider final text exceeded display limit')); return; }
           if ((provider === 'claude' || provider === 'cursor') && !streamedText && finalText) onOutput(finalText);
-          resolve({ text: finalText, providerSessionId: sessionId });
+          resolve(usage ? { text: finalText, providerSessionId: sessionId, usage } : { text: finalText, providerSessionId: sessionId });
         });
         child.stdin.on('error', (error) => fail(error));
         child.stdin.end(text);
